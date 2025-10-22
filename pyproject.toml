@@ -1,0 +1,37 @@
+# pyproject.toml
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "TurboDiff"
+version = "0.1.0"
+description = "2D fluid simulation library for modeling wind fields with advection, diffusion, and visualization backends."
+readme = "README.md"
+authors = [
+  { name = "Musab Kasbati", email = "musab.kas@gmail.com" },
+  { name = "Muhammad Saad", email = "ms08063@st.habib.edu.pk" }
+]
+license = { text = "MIT" }
+requires-python = ">=3.9"
+
+dependencies = [
+  "numpy>=1.24",
+  "matplotlib>=3.8",
+  "pygame>=2.5",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "black",
+  "ruff",
+  "sphinx",
+  "sphinx-rtd-theme",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools]
+include-package-data = true
