@@ -28,6 +28,7 @@ dev = [
   "ruff",
   "sphinx",
   "sphinx-rtd-theme",
+  "pre-commit"
 ]
 
 [tool.setuptools.packages.find]
