@@ -1,4 +1,5 @@
-from turbodiff.core.fluid_grid import FluidGrid
+# from turbodiff.core.fluid_grid import FluidGrid
+from turbodiff import FluidGrid
 
 
 def test_tester():
