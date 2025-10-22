@@ -2,7 +2,7 @@
 from turbodiff import FluidGrid
 
 
-def test_tester():
+def test_base():
     grid = FluidGrid(4, 4, 0, 0, 0, [(0, 0, 0.1)])
     assert grid.length == 4
     assert grid.width == 4
