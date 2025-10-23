@@ -37,8 +37,8 @@ class FluidGrid:
         self.visualise = visualise
         self.show_velocity = show_velocity
 
-        self.diff = diffusion
-        self.visc = viscosity
+        self.diffusion = diffusion
+        self.viscosity = viscosity
 
         self.grid = [
             [
@@ -110,11 +110,8 @@ class FluidGrid:
                         # print(self.velocities_y[cell_edges[2][0]][cell_edges[2][1]])
                         # print(self.velocities_y[cell_edges[3][0]][cell_edges[3][1]])
 
-                        # for row in self.velocities_x:
-                        #     print(row)
-
             self._dens_step()
-            # _vel_step()
+            # self._vel_step() -> TODO
 
             if self.visualise:  # move visualisation forward
                 self._draw_grid()
@@ -122,14 +119,42 @@ class FluidGrid:
             step += 1
 
     # private methods
+    def _update_cells(self):
+        for i in range(self.height):
+            for j in range(self.width):
+                self.grid[i][j].update_cell()
+
     def _dens_step(self):
         self._add_source()
-        # self._diffuse()
+        self._diffuse()
+        # self._advect() -> TODO
 
-    # def _vel_step(self, N: int, )
+    def _vel_step(self):
+        # As per Joe Stam paper -> but note that we represent velocities on edges so we have to handle it slightly differently -> more similar to Sebastian's vid
+        # self._add_source() -> TODO - should be partly generalisable from density work
+        # self._diffuse() -> TODO - should be partly generalisable from density work
+        # self._project() # remove curl -> TODO
+        # self._advect() -> TODO
+        pass
 
-    # def _diffuse(self):
-    #     se
+    def _diffuse(self):
+        a = (
+            self.dt * self.diffusion * self.height * self.width
+        )  # controls rate of approach/equalisation
+        for _ in range(
+            20
+        ):  # Iterations of Gauss Siedel -> Since matrix is sparse, we don't build it explicitly -> since we don't build it explicitly, we can't use utils method
+            for i in range(1, self.height - 1):
+                for j in range(1, self.width - 1):
+                    neighbors = [
+                        self.grid[i + di][j + dj].density
+                        for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                        if not self.grid[i + di][j + dj].is_solid
+                    ]
+                    self.grid[i][j].density = (
+                        self.grid[i][j].prev_density + a * (sum(neighbors))
+                    ) / (1 + len(neighbors) * a)
+        self._update_cells()
 
     def _add_source(self):
         for row in self.grid:
@@ -250,12 +275,12 @@ class FluidGrid:
 
 if __name__ == "__main__":
     grid = FluidGrid(
-        10,
-        10,
-        0,
-        0,
-        0.1,
-        [(3, 3, 0.5), (5, 5, 0.2)],
+        height=10,
+        width=10,
+        diffusion=0.1,
+        viscosity=0,
+        dt=0.1,
+        sources=[(3, 3, 0.5), (5, 5, 0.2)],
         random_vel=False,
         visualise=True,
         show_velocity=True,
