@@ -101,9 +101,9 @@ class FluidGrid:
                         j = mx // self.cell_size
                         i = my // self.cell_size
 
-                        cell_edges = self.grid[i][j].get_edges_index()
+                        # cell_edges = self.grid[i][j].get_edges_index()
                         print(f"Clicked cell: ({i}, {j})")
-                        print(f"Corresponding Velocities: ({cell_edges})")
+                        # print(f"Corresponding Velocities Indices: ({cell_edges})")
                         # print(f"Corresponding Values:")
                         # print(self.velocities_x[cell_edges[0][0]][cell_edges[0][1]])
                         # print(self.velocities_x[cell_edges[1][0]][cell_edges[1][1]])
@@ -256,7 +256,7 @@ if __name__ == "__main__":
         0,
         0.1,
         [(3, 3, 0.5), (5, 5, 0.2)],
-        random_vel=True,
+        random_vel=False,
         visualise=True,
         show_velocity=True,
     )

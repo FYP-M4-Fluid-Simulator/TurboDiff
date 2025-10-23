@@ -3,6 +3,6 @@ from turbodiff import FluidGrid
 
 
 def test_base():
-    grid = FluidGrid(4, 4, 0, 0, 0, [(0, 0, 0.1)])
+    grid = FluidGrid(4, 4, 0, 0, 0, [(2, 2, 0.1)])
     assert grid.height == 4
     assert grid.width == 4

@@ -22,6 +22,8 @@ class FluidCell:
         self.source = 0  # may be set later
 
     def set_source(self, s):
+        if self.is_solid:
+            raise TypeError("Solid cell can not be a source")
         self.source = s
 
     def add_source(self, dt):
