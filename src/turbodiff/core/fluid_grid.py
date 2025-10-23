@@ -43,11 +43,11 @@ class FluidGrid:
         self.grid = [
             [
                 FluidCell(
-                    (i, j), 0, i == 0 or i == width - 1 or j == 0 or j == height - 1
+                    (i, j), 0, i == 0 or i == height - 1 or j == 0 or j == width - 1
                 )
-                for i in range(width)
+                for j in range(width)
             ]
-            for j in range(height)
+            for i in range(height)
         ]  # create 2d grid with all cells at density 0
 
         if not random_vel:
@@ -67,6 +67,15 @@ class FluidGrid:
                 for _ in range(self.height + 1)
             ]
 
+            for i in range(self.height):
+                for j in range(self.width):
+                    if self.grid[i][j].is_solid:
+                        vels = self.grid[i][j].get_edges_index()
+                        self.velocities_x[vels[0][0]][vels[0][1]] = 0
+                        self.velocities_x[vels[1][0]][vels[1][1]] = 0
+                        self.velocities_y[vels[2][0]][vels[2][1]] = 0
+                        self.velocities_y[vels[3][0]][vels[3][1]] = 0
+
         for x, y, s in sources:
             self.grid[x][y].set_source(s)
 
@@ -84,6 +93,25 @@ class FluidGrid:
                 for event in pygame.event.get():  # allow exit
                     if event.type == pygame.QUIT:
                         return
+                    elif event.type == pygame.MOUSEBUTTONDOWN:  # for debugging
+                        # Get mouse position (pixels)
+                        mx, my = pygame.mouse.get_pos()
+
+                        # Convert to grid coordinates
+                        j = mx // self.cell_size
+                        i = my // self.cell_size
+
+                        cell_edges = self.grid[i][j].get_edges_index()
+                        print(f"Clicked cell: ({i}, {j})")
+                        print(f"Corresponding Velocities: ({cell_edges})")
+                        # print(f"Corresponding Values:")
+                        # print(self.velocities_x[cell_edges[0][0]][cell_edges[0][1]])
+                        # print(self.velocities_x[cell_edges[1][0]][cell_edges[1][1]])
+                        # print(self.velocities_y[cell_edges[2][0]][cell_edges[2][1]])
+                        # print(self.velocities_y[cell_edges[3][0]][cell_edges[3][1]])
+
+                        # for row in self.velocities_x:
+                        #     print(row)
 
             self._dens_step()
             # _vel_step()
@@ -133,43 +161,88 @@ class FluidGrid:
                 )
                 pygame.draw.rect(self.screen, color, rect)
 
-                # Show velocity as arrows - if flag set
-                # Show velocity as arrows - if flag set
-                if self.show_velocity:
-                    vx, vy = cell.velocity
-                    cx = x * self.cell_size + self.cell_size // 2
-                    cy = y * self.cell_size + self.cell_size // 2
+        # Show velocity as arrows - if flag set
+        if self.show_velocity:
+            # Horizontal Velocity
+            for i in range(self.height):
+                for j in range(self.width + 1):
+                    # Get and clamp velocity
+                    mag_dir = self.velocities_x[i][j]
+                    mag_dir = min(1.0, mag_dir) if mag_dir > 0 else max(-1.0, mag_dir)
 
-                    # Fixed arrow height for visibility
-                    scale = self.cell_size * 0.4
-                    end_x = cx + vx * scale
-                    end_y = cy + vy * scale
-
-                    # Compute magnitude for color mapping
-                    mag = (vx**2 + vy**2) ** 0.5
-                    mag = min(1.0, mag)
-                    r = int(255 * mag)
+                    # Map color based on magnitude
+                    r = int(255 * abs(mag_dir))
                     g = 0
-                    b = int(255 * (1 - mag))
+                    b = int(255 * (1 - abs(mag_dir)))
                     color = (r, g, b)
+                    # Scale arrow as per grid size for visibility
+                    scale = self.cell_size * 0.4
+
+                    # Arrow end points
+                    start_x = j * self.cell_size
+                    end_x = start_x + scale * mag_dir
+                    y = (i + 0.5) * self.cell_size
+
+                    pygame.draw.line(self.screen, color, (start_x, y), (end_x, y), 2)
 
                     # Draw main arrow line
-                    pygame.draw.line(self.screen, color, (cx, cy), (end_x, end_y), 2)
-
-                    angle = math.atan2(vy, vx)
-                    tip_len = self.cell_size / 10  # height of arrowhead sides
+                    angle = 0 if mag_dir > 0 else math.pi
+                    tip_len = scale * abs(mag_dir) / 2  # height of arrowhead sides
                     spread = math.radians(25)  # angle between the two sides
 
-                    # Compute the two base points of the triangle
+                    # # Compute the two base points of the triangle
                     left_x = end_x - tip_len * math.cos(angle - spread)
-                    left_y = end_y - tip_len * math.sin(angle - spread)
+                    left_y = y - tip_len * math.sin(angle - spread)
                     right_x = end_x - tip_len * math.cos(angle + spread)
-                    right_y = end_y - tip_len * math.sin(angle + spread)
+                    right_y = y - tip_len * math.sin(angle + spread)
+                    # print(left_y - y)
+                    # print(y - right_y)
 
                     pygame.draw.polygon(
                         self.screen,
                         color,
-                        [(end_x, end_y), (left_x, left_y), (right_x, right_y)],
+                        [(end_x, y), (left_x, left_y), (right_x, right_y)],
+                    )
+
+            # Vertical Velocity
+            for i in range(self.height + 1):
+                for j in range(self.width):
+                    # Get and clamp velocity
+                    mag_dir = self.velocities_y[i][j]
+                    mag_dir = min(1.0, mag_dir) if mag_dir > 0 else max(-1.0, mag_dir)
+
+                    # Map color based on magnitude
+                    r = int(255 * abs(mag_dir))
+                    g = 0
+                    b = int(255 * (1 - abs(mag_dir)))
+                    color = (r, g, b)
+                    # Scale arrow as per grid size for visibility
+                    scale = self.cell_size * 0.4
+
+                    # Arrow end points
+                    x = (j + 0.5) * self.cell_size
+                    start_y = i * self.cell_size
+                    end_y = start_y + scale * mag_dir
+
+                    pygame.draw.line(self.screen, color, (x, start_y), (x, end_y), 2)
+
+                    # Draw main arrow line
+                    angle = math.pi / 2 if mag_dir > 0 else -math.pi / 2
+                    tip_len = scale * abs(mag_dir) / 2  # height of arrowhead sides
+                    spread = math.radians(25)  # angle between the two sides
+
+                    # # Compute the two base points of the triangle
+                    left_x = end_x - tip_len * math.cos(angle - spread)
+                    left_y = y - tip_len * math.sin(angle - spread)
+                    right_x = end_x - tip_len * math.cos(angle + spread)
+                    right_y = y - tip_len * math.sin(angle + spread)
+                    # print(left_y - y)
+                    # print(y - right_y)
+
+                    pygame.draw.polygon(
+                        self.screen,
+                        color,
+                        [(end_x, y), (left_x, left_y), (right_x, right_y)],
                     )
 
         pygame.display.flip()
@@ -185,6 +258,6 @@ if __name__ == "__main__":
         [(3, 3, 0.5), (5, 5, 0.2)],
         random_vel=True,
         visualise=True,
-        show_velocity=False,
+        show_velocity=True,
     )
     grid.simulate()
