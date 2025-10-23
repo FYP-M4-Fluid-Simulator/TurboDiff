@@ -7,21 +7,30 @@ from turbodiff.core.fluid_cell import FluidCell
 
 
 class FluidGrid:
+    """
+    MAC Grid representation: The grid is made up of cells and cell edges. Density is stored in cells. Velocity is stored on edges
+    Grid size is height * Width
+    dt: represents size of timestep
+    sources: list of points which are a source, and then amount of flow coming from those cells
+    """
+
     grid: list[list[FluidCell]]
 
     def __init__(
         self,
-        length: int,
+        height: int,
         width: int,
         diffusion: int,
         viscosity: int,
         dt: float,
-        sources: list[tuple[int, int, int]],  # list of x,y positions for sources of dye
+        sources: list[
+            tuple[int, int, float]
+        ],  # list of x,y positions for sources of dye
         random_vel: bool = False,
         visualise: bool = False,
         show_velocity: bool = False,
     ):
-        self.length = length
+        self.height = height
         self.width = width
         self.dt = dt
 
@@ -31,28 +40,41 @@ class FluidGrid:
         self.diff = diffusion
         self.visc = viscosity
 
+        self.grid = [
+            [
+                FluidCell(
+                    (i, j), 0, i == 0 or i == width - 1 or j == 0 or j == height - 1
+                )
+                for i in range(width)
+            ]
+            for j in range(height)
+        ]  # create 2d grid with all cells at density 0
+
         if not random_vel:
-            self.grid = [
-                [FluidCell(0, (0, 0), False) for _ in range(width)]
-                for _ in range(length)
-            ]  # create 2d grid with all cells at density 0 and velocity (0, 0)
+            self.velocities_x = [
+                [0 for _ in range(self.width + 1)] for _ in range(self.height)
+            ]
+            self.velocities_y = [
+                [0 for _ in range(self.width)] for _ in range(self.height + 1)
+            ]
         else:
-            self.grid = [
-                [
-                    FluidCell(0, (random.random() - 0.5, random.random() - 0.5), False)
-                    for i in range(width)
-                ]
-                for j in range(length)
-            ]  # create 2d grid with all cells at density 0 and velocity (0, 0)
+            self.velocities_x = [
+                [random.random() - 0.5 for _ in range(self.width + 1)]
+                for _ in range(self.height)
+            ]
+            self.velocities_y = [
+                [random.random() - 0.5 for _ in range(self.width)]
+                for _ in range(self.height + 1)
+            ]
 
         for x, y, s in sources:
             self.grid[x][y].set_source(s)
 
         if self.visualise:  # if visualising in pygame then initialise
             pygame.init()
-            self.cell_size = 1000 // max(self.length, self.width)
+            self.cell_size = 1000 // max(self.height, self.width)
             self.screen = pygame.display.set_mode(
-                (self.width * self.cell_size, self.length * self.cell_size)
+                (self.width * self.cell_size, self.height * self.cell_size)
             )
 
     def simulate(self, steps: int = -1):
@@ -93,7 +115,15 @@ class FluidGrid:
         for y, row in enumerate(self.grid):
             for x, cell in enumerate(row):
                 # Draw cell color (density)
-                val = max(0, min(255, int(cell.density * 255)))
+                if cell.is_solid:
+                    val = 0
+                else:
+                    GRAY_VALUE = 15
+                    val = max(
+                        GRAY_VALUE,
+                        GRAY_VALUE
+                        + min(255 - GRAY_VALUE, int(cell.density * (255 - GRAY_VALUE))),
+                    )
                 color = (val, val, val)
                 rect = pygame.Rect(
                     x * self.cell_size,
@@ -110,7 +140,7 @@ class FluidGrid:
                     cx = x * self.cell_size + self.cell_size // 2
                     cy = y * self.cell_size + self.cell_size // 2
 
-                    # Fixed arrow length for visibility
+                    # Fixed arrow height for visibility
                     scale = self.cell_size * 0.4
                     end_x = cx + vx * scale
                     end_y = cy + vy * scale
@@ -127,7 +157,7 @@ class FluidGrid:
                     pygame.draw.line(self.screen, color, (cx, cy), (end_x, end_y), 2)
 
                     angle = math.atan2(vy, vx)
-                    tip_len = self.cell_size / 10  # length of arrowhead sides
+                    tip_len = self.cell_size / 10  # height of arrowhead sides
                     spread = math.radians(25)  # angle between the two sides
 
                     # Compute the two base points of the triangle
@@ -155,6 +185,6 @@ if __name__ == "__main__":
         [(3, 3, 0.5), (5, 5, 0.2)],
         random_vel=True,
         visualise=True,
-        show_velocity=True,
+        show_velocity=False,
     )
     grid.simulate()
