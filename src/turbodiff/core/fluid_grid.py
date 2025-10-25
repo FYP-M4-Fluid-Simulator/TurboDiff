@@ -20,8 +20,8 @@ class FluidGrid:
         self,
         height: int,
         width: int,
-        diffusion: int,
-        viscosity: int,
+        diffusion: float,
+        viscosity: float,
         dt: float,
         sources: list[
             tuple[int, int, float]
@@ -52,10 +52,10 @@ class FluidGrid:
 
         if not random_vel:
             self.velocities_x = [
-                [0 for _ in range(self.width + 1)] for _ in range(self.height)
+                [0.0 for _ in range(self.width + 1)] for _ in range(self.height)
             ]
             self.velocities_y = [
-                [0 for _ in range(self.width)] for _ in range(self.height + 1)
+                [0.0 for _ in range(self.width)] for _ in range(self.height + 1)
             ]
         else:
             self.velocities_x = [
@@ -85,6 +85,7 @@ class FluidGrid:
             self.screen = pygame.display.set_mode(
                 (self.width * self.cell_size, self.height * self.cell_size)
             )
+            self.clock = pygame.time.Clock()
 
     def simulate(self, steps: int = -1):
         step = 0
@@ -115,6 +116,7 @@ class FluidGrid:
 
             if self.visualise:  # move visualisation forward
                 self._draw_grid()
+                self.clock.tick(30)
 
             step += 1
 
@@ -127,7 +129,7 @@ class FluidGrid:
     def _dens_step(self):
         self._add_source()
         self._diffuse()
-        # self._advect() -> TODO
+        self._advect()
 
     def _vel_step(self):
         # As per Joe Stam paper -> but note that we represent velocities on edges so we have to handle it slightly differently -> more similar to Sebastian's vid
@@ -155,6 +157,78 @@ class FluidGrid:
                         self.grid[i][j].prev_density + a * (sum(neighbors))
                     ) / (1 + len(neighbors) * a)
         self._update_cells()
+
+    def _advect(self):
+        """
+        Advection using semi-Lagrangian method with bilinear interpolation.
+        Follows particles backward in time through the velocity field.
+        """
+        N = max(self.height, self.width) - 2  # Internal grid size (excluding boundaries)
+        dt0 = self.dt * N
+        
+        for i in range(1, self.height - 1):
+            for j in range(1, self.width - 1):
+                # Get velocity at cell center by averaging edge velocities
+                u = (self.velocities_x[i][j] + self.velocities_x[i][j + 1]) / 2.0
+                v = (self.velocities_y[i][j] + self.velocities_y[i + 1][j]) / 2.0
+                
+                # Trace particle backward in time
+                x = j - dt0 * u
+                y = i - dt0 * v
+                
+                # Clamp to grid boundaries
+                if x < 0.5:
+                    x = 0.5
+                if x > self.width - 1.5:
+                    x = self.width - 1.5
+                if y < 0.5:
+                    y = 0.5
+                if y > self.height - 1.5:
+                    y = self.height - 1.5
+                
+                # Get integer and fractional parts for bilinear interpolation
+                i0 = int(y)
+                i1 = i0 + 1
+                j0 = int(x)
+                j1 = j0 + 1
+                
+                # Interpolation weights
+                s1 = x - j0
+                s0 = 1 - s1
+                t1 = y - i0
+                t0 = 1 - t1
+                
+                # Bilinear interpolation
+                self.grid[i][j].density = (
+                    s0 * (t0 * self.grid[i0][j0].prev_density + t1 * self.grid[i1][j0].prev_density) +
+                    s1 * (t0 * self.grid[i0][j1].prev_density + t1 * self.grid[i1][j1].prev_density)
+                )
+        
+        # Update cells and apply boundary conditions
+        self._update_cells()
+        self._set_bnd()
+    
+    def _set_bnd(self):
+        """
+        Apply boundary conditions for density.
+        Sets boundary values based on adjacent interior values.
+        """
+        # Left and right boundaries
+        for i in range(1, self.height - 1):
+            self.grid[i][0].density = self.grid[i][1].density
+            self.grid[i][self.width - 1].density = self.grid[i][self.width - 2].density
+        
+        # Top and bottom boundaries
+        for j in range(1, self.width - 1):
+            self.grid[0][j].density = self.grid[1][j].density
+            self.grid[self.height - 1][j].density = self.grid[self.height - 2][j].density
+        
+        # Corners
+        self.grid[0][0].density = 0.5 * (self.grid[1][0].density + self.grid[0][1].density)
+        self.grid[0][self.width - 1].density = 0.5 * (self.grid[1][self.width - 1].density + self.grid[0][self.width - 2].density)
+        self.grid[self.height - 1][0].density = 0.5 * (self.grid[self.height - 2][0].density + self.grid[self.height - 1][1].density)
+        self.grid[self.height - 1][self.width - 1].density = 0.5 * (self.grid[self.height - 2][self.width - 1].density + self.grid[self.height - 1][self.width - 2].density)
+
 
     def _add_source(self):
         for row in self.grid:
@@ -275,14 +349,47 @@ class FluidGrid:
 
 if __name__ == "__main__":
     grid = FluidGrid(
-        height=10,
-        width=10,
-        diffusion=0.1,
+        height=50,
+        width=50,
+        diffusion=0.0001,
         viscosity=0,
-        dt=0.1,
-        sources=[(3, 3, 0.5), (5, 5, 0.2)],
+        dt=0.05,
+        sources=[(10, 25, 100)],
         random_vel=False,
         visualise=True,
         show_velocity=True,
     )
+    
+    # Create a velocity field to demonstrate advection
+    # Add a circular/vortex flow pattern
+    center_i = grid.height // 2
+    center_j = grid.width // 2
+    
+    for i in range(grid.height):
+        for j in range(grid.width + 1):
+            # Horizontal velocities - create circular flow
+            di = i - center_i
+            dj = j - center_j
+            dist = max(0.1, (di**2 + dj**2)**0.5)
+            # Circular flow: velocity perpendicular to radius
+            grid.velocities_x[i][j] = -di / dist * 2.0
+    
+    for i in range(grid.height + 1):
+        for j in range(grid.width):
+            # Vertical velocities
+            di = i - center_i
+            dj = j - center_j
+            dist = max(0.1, (di**2 + dj**2)**0.5)
+            grid.velocities_y[i][j] = dj / dist * 2.0
+    
+    # Zero out velocities at solid boundaries
+    for i in range(grid.height):
+        for j in range(grid.width):
+            if grid.grid[i][j].is_solid:
+                vels = grid.grid[i][j].get_edges_index()
+                grid.velocities_x[vels[0][0]][vels[0][1]] = 0
+                grid.velocities_x[vels[1][0]][vels[1][1]] = 0
+                grid.velocities_y[vels[2][0]][vels[2][1]] = 0
+                grid.velocities_y[vels[3][0]][vels[3][1]] = 0
+    
     grid.simulate()
