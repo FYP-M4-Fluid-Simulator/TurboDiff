@@ -33,6 +33,7 @@ class FluidGrid:
         ],  # list of x,y positions for sources of dye
         field_type: str = "zero",
         visualise: bool = False,
+        show_cell_property: str = "density",
         show_velocity: bool = False,
         show_cell_centered_velocity: bool = False,
     ):
@@ -41,6 +42,8 @@ class FluidGrid:
         self.dt = dt
 
         self.visualise = visualise
+        self.show_cell_property = show_cell_property
+        
         self.show_velocity = show_velocity
         self.show_cell_centered_velocity = show_cell_centered_velocity
 
@@ -192,7 +195,7 @@ class FluidGrid:
         # self._vel_diffuse() -> TODO? - should be partly generalisable from density work -> not needed for inviscid/non-viscous (suitable simplification for air I believe) fluids so left for now
         # self._vel_project() # only uncomment if anything above is implemented
         # self._vel_advect() # -> TODO - should work directly for spiral field, so let's test?
-        # self._vel_project() # remove curl -> TODO
+        self._vel_project() # remove curl -> TODO
         pass
 
     def _dens_diffuse(self):
@@ -308,59 +311,60 @@ class FluidGrid:
                 cell.add_source(self.dt)
         self._update_cells()
 
-    def _vel_advect(self):
-        """
-        Advection of velocities using semi-Lagrangian method with bilinear interpolation.
-        Follows particles backward in time through the velocity field.
-        Uses face-centered velocities (MAC grid).
-        """
-        N = (
-            max(self.height, self.width) - 2
-        )  # Internal grid size (excluding boundaries)
-        dt0 = self.dt * N
+    # def _vel_advect(self):
+    #     """
+    #     Advection of velocities using semi-Lagrangian method with bilinear interpolation.
+    #     Follows particles backward in time through the velocity field.
+    #     Uses face-centered velocities (MAC grid).
+    #     """
+    #     N = (
+    #         max(self.height, self.width) - 2
+    #     )  # Internal grid size (excluding boundaries)
+    #     dt0 = self.dt * N
 
-        for i in range(1, self.height - 1):
-            for j in range(1, self.width - 1):
-                # Get velocity at cell center
-                x = j + 0.5
-                y = i + 0.5
-                u, v = self._get_velocity_at(x, y)
+    #     for i in range(1, self.height - 1):
+    #         for j in range(1, self.width - 1):
+    #             # Get velocity at cell center
+    #             x = j + 0.5
+    #             y = i + 0.5
+    #             u, v = self._get_velocity_at(x, y)
 
-                # Trace particle backward in time
-                x -= dt0 * u
-                y -= dt0 * v
+    #             # Trace particle backward in time
+    #             x -= dt0 * u
+    #             y -= dt0 * v
 
-                # Clamp to grid boundaries
-                x = max(0.5, min(self.width - 1.5, x))
-                y = max(0.5, min(self.height - 1.5, y))
+    #             # Clamp to grid boundaries
+    #             x = max(0.5, min(self.width - 1.5, x))
+    #             y = max(0.5, min(self.height - 1.5, y))
                 
-                # Adjust for cell centres being at (i+0.5, j+0.5)
-                x -= 0.5
-                y -= 0.5
+    #             # Adjust for cell centres being at (i+0.5, j+0.5)
+    #             x -= 0.5
+    #             y -= 0.5
 
-                # Get integer and fractional parts for bilinear interpolation
-                i0 = int(y) 
-                i1 = i0 + 1
-                j0 = int(x) 
-                j1 = j0 + 1
+    #             # Get integer and fractional parts for bilinear interpolation
+    #             i0 = int(y) 
+    #             i1 = i0 + 1
+    #             j0 = int(x) 
+    #             j1 = j0 + 1
 
-                # Interpolation weights
-                s1 = x - j0 
-                s0 = 1 - s1
-                t1 = y - i0
-                t0 = 1 - t1
+    #             # Interpolation weights
+    #             s1 = x - j0 
+    #             s0 = 1 - s1
+    #             t1 = y - i0
+    #             t0 = 1 - t1
 
-                # Bilinear interpolation
-                self.grid[i][j].next_density = s0 * (
-                    t0 * self.grid[i0][j0].density
-                    + t1 * self.grid[i1][j0].density
-                ) + s1 * (
-                    t0 * self.grid[i0][j1].density
-                    + t1 * self.grid[i1][j1].density
-                )
+    #             # Bilinear interpolation
+    #             self.grid[i][j].next_density = s0 * (
+    #                 t0 * self.grid[i0][j0].density
+    #                 + t1 * self.grid[i1][j0].density
+    #             ) + s1 * (
+    #                 t0 * self.grid[i0][j1].density
+    #                 + t1 * self.grid[i1][j1].density
+    #             )
     
     def _vel_project(self):
-        pass
+        h = 1.0 / max(self.height, self.width)
+        # for i in range(self.)
     
     def _draw_grid(self):
         self.screen.fill((0, 0, 0))  # clear background
@@ -369,15 +373,25 @@ class FluidGrid:
             for x, cell in enumerate(row):
                 # Draw cell color (density)
                 if cell.is_solid:
-                    val = 0
+                    color = (0, 0, 0)
                 else:
-                    GRAY_VALUE = 30
-                    val = max(
-                        GRAY_VALUE,
-                        GRAY_VALUE
-                        + min(255 - GRAY_VALUE, int(cell.density * (255 - GRAY_VALUE))),
-                    )
-                color = (val, val, val)
+                    if self.show_cell_property == "density":
+                        GRAY_VALUE = 30
+                        val = max(
+                            GRAY_VALUE,
+                            GRAY_VALUE
+                            + min(255 - GRAY_VALUE, int(cell.density * (255 - GRAY_VALUE))),
+                        )
+                        color = (val, val, val)
+                    elif self.show_cell_property == "divergence":
+                        vel_edges = self.grid[y][x].get_edges_index()
+                        div = (
+                            self.velocities_x[vel_edges[1][0]][vel_edges[1][1]]
+                            - self.velocities_x[vel_edges[0][0]][vel_edges[0][1]]
+                            + self.velocities_y[vel_edges[3][0]][vel_edges[3][1]]
+                            - self.velocities_y[vel_edges[2][0]][vel_edges[2][1]]
+                        )
+                        color = (max(0, min(255, int(div * 127))), 0, max(0, min(255, int(-div * 127))))
                 rect = pygame.Rect(
                     x * self.cell_size,
                     y * self.cell_size,
@@ -573,8 +587,9 @@ if __name__ == "__main__":
         viscosity=0,
         dt=0.02,
         sources=[(10, 25, 100)],
-        field_type="spiral",
+        field_type="random",
         visualise=True,
+        show_cell_property="divergence",
         show_velocity=True,
         show_cell_centered_velocity=True,
     )
