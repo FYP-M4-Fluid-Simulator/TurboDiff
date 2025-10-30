@@ -186,15 +186,19 @@ class FluidGrid:
                 # Clamp to grid boundaries
                 x = max(0.5, min(self.width - 1.5, x))
                 y = max(0.5, min(self.height - 1.5, y))
+                
+                # Adjust for cell centres being at (i+0.5, j+0.5)
+                x -= 0.5
+                y -= 0.5
 
                 # Get integer and fractional parts for bilinear interpolation
-                i0 = int(y)
+                i0 = int(y) 
                 i1 = i0 + 1
-                j0 = int(x)
+                j0 = int(x) 
                 j1 = j0 + 1
 
                 # Interpolation weights
-                s1 = x - j0
+                s1 = x - j0 
                 s0 = 1 - s1
                 t1 = y - i0
                 t0 = 1 - t1
@@ -458,7 +462,7 @@ if __name__ == "__main__":
     grid = FluidGrid(
         height=50,
         width=50,
-        diffusion=0.0001,
+        diffusion=0.01,
         viscosity=0,
         dt=0.02,
         sources=[(10, 25, 100)],
