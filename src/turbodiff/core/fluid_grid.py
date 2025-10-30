@@ -15,8 +15,8 @@ class FluidGrid:
     """
 
     grid: list[list[FluidCell]]
-    velocities_x: list[list[float]]  # horizontal velocities on vertical edges
-    velocities_y: list[list[float]]  # vertical velocities on horizontal edges
+    velocities_x: list[list[float]]  # horizontal velocities on vertical edges -> positive is to right
+    velocities_y: list[list[float]]  # vertical velocities on horizontal edges -> positive is downwards
     
     next_velocities_x: list[list[float]]  # horizontal velocities on vertical edges
     next_velocities_y: list[list[float]]  # vertical velocities on horizontal edges
@@ -159,9 +159,9 @@ class FluidGrid:
                         j = mx // self.cell_size
                         i = my // self.cell_size
 
-                        # cell_edges = self.grid[i][j].get_edges_index()
+                        cell_edges = self.grid[i][j].get_edges_index()
                         print(f"Clicked cell: ({i}, {j})")
-                        # self.velocities_x[cell_edges[0][0]][cell_edges[0][1]] += 0.2
+                        self.velocities_y[cell_edges[2][0]][cell_edges[2][1]] += 0.2
                         # print(f"Corresponding Velocities Indices: ({cell_edges})")
                         # print(f"Corresponding Values:")
                         # print(self.velocities_x[cell_edges[0][0]][cell_edges[0][1]])
@@ -362,10 +362,56 @@ class FluidGrid:
     #                 + t1 * self.grid[i1][j1].density
     #             )
     
-    def _vel_project(self):
-        h = 1.0 / max(self.height, self.width)
-        # for i in range(self.)
+    def _get_divergence(self, i, j):
+        div = 0.0
+        vel_edges = self.grid[i][j].get_edges_index()
+        div += self.velocities_x[vel_edges[1][0]][vel_edges[1][1]] # right edge
+        div -= self.velocities_x[vel_edges[0][0]][vel_edges[0][1]] # left edge
+        div += self.velocities_y[vel_edges[2][0]][vel_edges[2][1]] # up edge
+        div -= self.velocities_y[vel_edges[3][0]][vel_edges[3][1]] # down edge
+        return div * max(self.height, self.width)
     
+    def _vel_project(self):
+        pressure = [
+            [0.0 for _ in range(self.width)] for _ in range(self.height)
+        ]
+        
+        def get_pressures(i, j):
+            if self.grid[i][j].is_solid:
+                return []
+            neighbors = []
+            if j > 0 and not self.grid[i][j - 1].is_solid: # left
+                neighbors.append(pressure[i][j - 1])
+            if j < self.width - 1 and not self.grid[i][j + 1].is_solid: # right
+                neighbors.append(pressure[i][j + 1])
+            if i > 0 and not self.grid[i - 1][j].is_solid: # up
+                neighbors.append(pressure[i - 1][j])
+            if i < self.height - 1 and not self.grid[i + 1][j].is_solid: # down
+                neighbors.append(pressure[i + 1][j])
+            return neighbors
+        
+        h = 1 / max(self.height, self.width)
+
+        for _ in range(20): # Gauss Seidel iterations
+            for i in range(self.height):
+                for j in range(self.width):
+                    pressures = get_pressures(i, j)
+                    pressure[i][j] = (sum(pressures) - self._get_divergence(i, j)) / len(pressures) if pressures else 0.0
+
+        for i in range(1, self.height - 1):
+            for j in range(1, self.width):
+                # Horizontal velocities
+                p_right = pressure[i][j]
+                p_left = pressure[i][j - 1]
+                self.velocities_x[i][j] -= (p_right - p_left) / h
+                
+        for i in range(1, self.height):
+            for j in range(1, self.width - 1):
+                # Vertical velocities
+                p_down = pressure[i][j]
+                p_up = pressure[i - 1][j]
+                self.velocities_y[i][j] -= (p_up - p_down) / h
+
     def _draw_grid(self):
         self.screen.fill((0, 0, 0))  # clear background
 
@@ -384,13 +430,7 @@ class FluidGrid:
                         )
                         color = (val, val, val)
                     elif self.show_cell_property == "divergence":
-                        vel_edges = self.grid[y][x].get_edges_index()
-                        div = (
-                            self.velocities_x[vel_edges[1][0]][vel_edges[1][1]]
-                            - self.velocities_x[vel_edges[0][0]][vel_edges[0][1]]
-                            + self.velocities_y[vel_edges[3][0]][vel_edges[3][1]]
-                            - self.velocities_y[vel_edges[2][0]][vel_edges[2][1]]
-                        )
+                        div = self._get_divergence(y, x)
                         color = (max(0, min(255, int(div * 127))), 0, max(0, min(255, int(-div * 127))))
                 rect = pygame.Rect(
                     x * self.cell_size,
@@ -587,7 +627,7 @@ if __name__ == "__main__":
         viscosity=0,
         dt=0.02,
         sources=[(10, 25, 100)],
-        field_type="random",
+        field_type="spiral",
         visualise=True,
         show_cell_property="divergence",
         show_velocity=True,
