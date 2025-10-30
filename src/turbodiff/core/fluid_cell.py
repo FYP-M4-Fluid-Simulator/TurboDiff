@@ -13,11 +13,11 @@ class FluidCell:
 
         # need prev value for calculation
         if not self.is_solid:
-            self.prev_density = density
             self.density = density
+            self.next_density = density
         else:
-            self.prev_density = 0
             self.density = 0
+            self.next_density = 0
 
         self.source = 0  # may be set later
 
@@ -27,10 +27,10 @@ class FluidCell:
         self.source = s
 
     def add_source(self, dt):
-        self.density += dt * self.source
+        self.next_density += dt * self.source
 
     def update_cell(self):
-        self.prev_density = self.density
+        self.density = self.next_density
 
     def get_edges_index(self):
         """Returns veloocity edge indexes for: (left vel x, right vel x, up vel y, down vel y)"""

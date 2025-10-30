@@ -17,6 +17,9 @@ class FluidGrid:
     grid: list[list[FluidCell]]
     velocities_x: list[list[float]]  # horizontal velocities on vertical edges
     velocities_y: list[list[float]]  # vertical velocities on horizontal edges
+    
+    next_velocities_x: list[list[float]]  # horizontal velocities on vertical edges
+    next_velocities_y: list[list[float]]  # vertical velocities on horizontal edges
 
     def __init__(
         self,
@@ -153,7 +156,7 @@ class FluidGrid:
                         j = mx // self.cell_size
                         i = my // self.cell_size
 
-                        cell_edges = self.grid[i][j].get_edges_index()
+                        # cell_edges = self.grid[i][j].get_edges_index()
                         print(f"Clicked cell: ({i}, {j})")
                         # self.velocities_x[cell_edges[0][0]][cell_edges[0][1]] += 0.2
                         # print(f"Corresponding Velocities Indices: ({cell_edges})")
@@ -163,8 +166,8 @@ class FluidGrid:
                         # print(self.velocities_y[cell_edges[2][0]][cell_edges[2][1]])
                         # print(self.velocities_y[cell_edges[3][0]][cell_edges[3][1]])
 
+            self._vel_step()
             self._dens_step()
-            # self._vel_step() -> TODO
 
             if self.visualise:  # move visualisation forward
                 self._draw_grid()
@@ -179,19 +182,20 @@ class FluidGrid:
                 self.grid[i][j].update_cell()
 
     def _dens_step(self):
-        self._add_source()
-        self._diffuse()
-        self._advect()
+        self._dens_add_source()
+        self._dens_diffuse()
+        self._dens_advect()
 
     def _vel_step(self):
         # As per Joe Stam paper -> but note that we represent velocities on edges so we have to handle it slightly differently -> more similar to Sebastian's vid
-        # self._add_source() -> TODO - should be partly generalisable from density work
-        # self._diffuse() -> TODO - should be partly generalisable from density work
-        # self._project() # remove curl -> TODO
-        # self._advect() -> TODO
+        # self._vel_add_source() -> TODO - should be partly generalisable from density work
+        # self._vel_diffuse() -> TODO? - should be partly generalisable from density work -> not needed for inviscid/non-viscous (suitable simplification for air I believe) fluids so left for now
+        # self._vel_project() # only uncomment if anything above is implemented
+        # self._vel_advect() # -> TODO - should work directly for spiral field, so let's test?
+        # self._vel_project() # remove curl -> TODO
         pass
 
-    def _diffuse(self):
+    def _dens_diffuse(self):
         a = (
             self.dt * self.diffusion * self.height * self.width
         )  # controls rate of approach/equalisation
@@ -201,16 +205,16 @@ class FluidGrid:
             for i in range(1, self.height - 1):
                 for j in range(1, self.width - 1):
                     neighbors = [
-                        self.grid[i + di][j + dj].density
+                        self.grid[i + di][j + dj].next_density
                         for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1))
                         if not self.grid[i + di][j + dj].is_solid
                     ]
-                    self.grid[i][j].density = (
-                        self.grid[i][j].prev_density + a * (sum(neighbors))
+                    self.grid[i][j].next_density = (
+                        self.grid[i][j].density + a * (sum(neighbors))
                     ) / (1 + len(neighbors) * a)
         self._update_cells()
 
-    def _advect(self):
+    def _dens_advect(self):
         """
         Advection using semi-Lagrangian method with bilinear interpolation.
         Follows particles backward in time through the velocity field.
@@ -253,57 +257,111 @@ class FluidGrid:
                 t0 = 1 - t1
 
                 # Bilinear interpolation
-                self.grid[i][j].density = s0 * (
-                    t0 * self.grid[i0][j0].prev_density
-                    + t1 * self.grid[i1][j0].prev_density
+                self.grid[i][j].next_density = s0 * (
+                    t0 * self.grid[i0][j0].density
+                    + t1 * self.grid[i1][j0].density
                 ) + s1 * (
-                    t0 * self.grid[i0][j1].prev_density
-                    + t1 * self.grid[i1][j1].prev_density
+                    t0 * self.grid[i0][j1].density
+                    + t1 * self.grid[i1][j1].density
                 )
 
         # Update cells and apply boundary conditions
+        self._dens_set_bnd()
         self._update_cells()
-        self._set_bnd()
 
-    def _set_bnd(self):
+    def _dens_set_bnd(self):
         """
         Apply boundary conditions for density.
         Sets boundary values based on adjacent interior values.
         """
         # Left and right boundaries
         for i in range(1, self.height - 1):
-            self.grid[i][0].density = self.grid[i][1].density
-            self.grid[i][self.width - 1].density = self.grid[i][self.width - 2].density
+            self.grid[i][0].next_density = self.grid[i][1].next_density
+            self.grid[i][self.width - 1].next_density = self.grid[i][self.width - 2].next_density
 
         # Top and bottom boundaries
         for j in range(1, self.width - 1):
-            self.grid[0][j].density = self.grid[1][j].density
-            self.grid[self.height - 1][j].density = self.grid[self.height - 2][
+            self.grid[0][j].next_density = self.grid[1][j].next_density
+            self.grid[self.height - 1][j].next_density = self.grid[self.height - 2][
                 j
-            ].density
+            ].next_density
 
         # Corners
-        self.grid[0][0].density = 0.5 * (
-            self.grid[1][0].density + self.grid[0][1].density
+        self.grid[0][0].next_density = 0.5 * (
+            self.grid[1][0].next_density + self.grid[0][1].next_density
         )
-        self.grid[0][self.width - 1].density = 0.5 * (
-            self.grid[1][self.width - 1].density + self.grid[0][self.width - 2].density
+        self.grid[0][self.width - 1].next_density = 0.5 * (
+            self.grid[1][self.width - 1].next_density + self.grid[0][self.width - 2].next_density
         )
-        self.grid[self.height - 1][0].density = 0.5 * (
-            self.grid[self.height - 2][0].density
-            + self.grid[self.height - 1][1].density
+        self.grid[self.height - 1][0].next_density = 0.5 * (
+            self.grid[self.height - 2][0].next_density
+            + self.grid[self.height - 1][1].next_density
         )
-        self.grid[self.height - 1][self.width - 1].density = 0.5 * (
-            self.grid[self.height - 2][self.width - 1].density
-            + self.grid[self.height - 1][self.width - 2].density
+        self.grid[self.height - 1][self.width - 1].next_density = 0.5 * (
+            self.grid[self.height - 2][self.width - 1].next_density
+            + self.grid[self.height - 1][self.width - 2].next_density
         )
 
-    def _add_source(self):
+    def _dens_add_source(self):
         for row in self.grid:
             for cell in row:
                 cell.add_source(self.dt)
-                cell.update_cell()
+        self._update_cells()
 
+    def _vel_advect(self):
+        """
+        Advection of velocities using semi-Lagrangian method with bilinear interpolation.
+        Follows particles backward in time through the velocity field.
+        Uses face-centered velocities (MAC grid).
+        """
+        N = (
+            max(self.height, self.width) - 2
+        )  # Internal grid size (excluding boundaries)
+        dt0 = self.dt * N
+
+        for i in range(1, self.height - 1):
+            for j in range(1, self.width - 1):
+                # Get velocity at cell center
+                x = j + 0.5
+                y = i + 0.5
+                u, v = self._get_velocity_at(x, y)
+
+                # Trace particle backward in time
+                x -= dt0 * u
+                y -= dt0 * v
+
+                # Clamp to grid boundaries
+                x = max(0.5, min(self.width - 1.5, x))
+                y = max(0.5, min(self.height - 1.5, y))
+                
+                # Adjust for cell centres being at (i+0.5, j+0.5)
+                x -= 0.5
+                y -= 0.5
+
+                # Get integer and fractional parts for bilinear interpolation
+                i0 = int(y) 
+                i1 = i0 + 1
+                j0 = int(x) 
+                j1 = j0 + 1
+
+                # Interpolation weights
+                s1 = x - j0 
+                s0 = 1 - s1
+                t1 = y - i0
+                t0 = 1 - t1
+
+                # Bilinear interpolation
+                self.grid[i][j].next_density = s0 * (
+                    t0 * self.grid[i0][j0].density
+                    + t1 * self.grid[i1][j0].density
+                ) + s1 * (
+                    t0 * self.grid[i0][j1].density
+                    + t1 * self.grid[i1][j1].density
+                )
+    
+    def _vel_project(self):
+        pass
+    
     def _draw_grid(self):
         self.screen.fill((0, 0, 0))  # clear background
 
