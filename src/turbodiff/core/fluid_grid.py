@@ -15,6 +15,8 @@ class FluidGrid:
     """
 
     grid: list[list[FluidCell]]
+    velocities_x: list[list[float]]  # horizontal velocities on vertical edges
+    velocities_y: list[list[float]]  # vertical velocities on horizontal edges
 
     def __init__(
         self,
@@ -26,7 +28,7 @@ class FluidGrid:
         sources: list[
             tuple[int, int, float]
         ],  # list of x,y positions for sources of dye
-        random_vel: bool = False,
+        field_type: str = "zero",
         visualise: bool = False,
         show_velocity: bool = False,
         show_cell_centered_velocity: bool = False,
@@ -51,15 +53,32 @@ class FluidGrid:
             ]
             for i in range(height)
         ]  # create 2d grid with all cells at density 0
+        
+        # Set velocity field
+        self.set_velocity_field(field_type)
 
-        if not random_vel:
+        for x, y, s in sources:
+            self.grid[x][y].set_source(s)
+
+        if self.visualise:  # if visualising in pygame then initialise
+            pygame.init()
+            pygame.display.set_caption("Fluid Simulation")
+            self.cell_size = 1000 // max(self.height, self.width)
+            self.screen = pygame.display.set_mode(
+                (self.width * self.cell_size, self.height * self.cell_size)
+            )
+            self.clock = pygame.time.Clock()
+
+    def set_velocity_field(self, field_type: str = "zero"):
+        if field_type == "zero": # Set all velocities to zero
             self.velocities_x = [
                 [0.0 for _ in range(self.width + 1)] for _ in range(self.height)
             ]
             self.velocities_y = [
                 [0.0 for _ in range(self.width)] for _ in range(self.height + 1)
             ]
-        else:
+            
+        elif field_type == "random": # Set random velocities
             self.velocities_x = [
                 [random.random() - 0.5 for _ in range(self.width + 1)]
                 for _ in range(self.height)
@@ -77,17 +96,47 @@ class FluidGrid:
                         self.velocities_x[vels[1][0]][vels[1][1]] = 0
                         self.velocities_y[vels[2][0]][vels[2][1]] = 0
                         self.velocities_y[vels[3][0]][vels[3][1]] = 0
+        
+        elif field_type == "spiral": # Set spiral/circular velocity field
+            # initialize velocity lists
+            self.velocities_x = [
+                [0.0 for _ in range(self.width + 1)] for _ in range(self.height)
+            ]
+            self.velocities_y = [
+                [0.0 for _ in range(self.width)] for _ in range(self.height + 1)
+            ]
+            
+            # Add a circular/vortex flow pattern
+            center_i = self.height // 2
+            center_j = self.width // 2
 
-        for x, y, s in sources:
-            self.grid[x][y].set_source(s)
+            for i in range(self.height):
+                for j in range(self.width + 1):
+                    # Horizontal velocities - create circular flow
+                    di = i - center_i
+                    dj = j - center_j
+                    dist = max(0.1, (di**2 + dj**2) ** 0.5)
+                    # Circular flow: velocity perpendicular to radius
+                    self.velocities_x[i][j] = -di / dist * 2.0
 
-        if self.visualise:  # if visualising in pygame then initialise
-            pygame.init()
-            self.cell_size = 1000 // max(self.height, self.width)
-            self.screen = pygame.display.set_mode(
-                (self.width * self.cell_size, self.height * self.cell_size)
-            )
-            self.clock = pygame.time.Clock()
+            for i in range(self.height + 1):
+                for j in range(self.width):
+                    # Vertical velocities
+                    di = i - center_i
+                    dj = j - center_j
+                    dist = max(0.1, (di**2 + dj**2) ** 0.5)
+                    self.velocities_y[i][j] = dj / dist * 2.0
+
+            # Zero out velocities at solid boundaries
+            for i in range(self.height):
+                for j in range(self.width):
+                    if self.grid[i][j].is_solid:
+                        vels = self.grid[i][j].get_edges_index()
+                        # print(vels)
+                        self.velocities_x[vels[0][0]][vels[0][1]] = 0
+                        self.velocities_x[vels[1][0]][vels[1][1]] = 0
+                        self.velocities_y[vels[2][0]][vels[2][1]] = 0
+                        self.velocities_y[vels[3][0]][vels[3][1]] = 0
 
     def simulate(self, steps: int = -1):
         step = 0
@@ -177,7 +226,7 @@ class FluidGrid:
                 # Get velocity at cell center
                 x = j + 0.5
                 y = i + 0.5
-                u, v = self.get_velocity_at(x, y)
+                u, v = self._get_velocity_at(x, y)
 
                 # Trace particle backward in time
                 x -= dt0 * u
@@ -288,7 +337,7 @@ class FluidGrid:
                         # Get velocity at cell center
                         x = j + 0.5
                         y = i + 0.5
-                        u, v = self.get_velocity_at(x, y)
+                        u, v = self._get_velocity_at(x, y)
 
                         # Get and clamp magnitude/direction
                         mag_dir_x = u
@@ -446,7 +495,7 @@ class FluidGrid:
 
         return (1 - yfrac) * value_top + yfrac * value_bottom
 
-    def get_velocity_at(self, px, py):
+    def _get_velocity_at(self, px, py):
         if self.grid[int(py)][int(px)].is_solid:
             return 0.0, 0.0
         u = self._sample_bilinear(
@@ -466,43 +515,10 @@ if __name__ == "__main__":
         viscosity=0,
         dt=0.02,
         sources=[(10, 25, 100)],
-        random_vel=False,
+        field_type="spiral",
         visualise=True,
         show_velocity=True,
         show_cell_centered_velocity=True,
     )
-
-    # Create a velocity field to demonstrate advection
-    # Add a circular/vortex flow pattern
-    center_i = grid.height // 2
-    center_j = grid.width // 2
-
-    for i in range(grid.height):
-        for j in range(grid.width + 1):
-            # Horizontal velocities - create circular flow
-            di = i - center_i
-            dj = j - center_j
-            dist = max(0.1, (di**2 + dj**2) ** 0.5)
-            # Circular flow: velocity perpendicular to radius
-            grid.velocities_x[i][j] = -di / dist * 2.0
-
-    for i in range(grid.height + 1):
-        for j in range(grid.width):
-            # Vertical velocities
-            di = i - center_i
-            dj = j - center_j
-            dist = max(0.1, (di**2 + dj**2) ** 0.5)
-            grid.velocities_y[i][j] = dj / dist * 2.0
-
-    # Zero out velocities at solid boundaries
-    for i in range(grid.height):
-        for j in range(grid.width):
-            if grid.grid[i][j].is_solid:
-                vels = grid.grid[i][j].get_edges_index()
-                # print(vels)
-                grid.velocities_x[vels[0][0]][vels[0][1]] = 0
-                grid.velocities_x[vels[1][0]][vels[1][1]] = 0
-                grid.velocities_y[vels[2][0]][vels[2][1]] = 0
-                grid.velocities_y[vels[3][0]][vels[3][1]] = 0
 
     grid.simulate()
