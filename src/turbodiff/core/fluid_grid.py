@@ -294,7 +294,7 @@ class FluidGrid:
                     end_x = start_x + scale * mag_dir
                     y = (i + 0.5) * self.cell_size
 
-                    pygame.draw.line(self.screen, color, (start_x, y), (end_x, y), 2)
+                    pygame.draw.aaline(self.screen, color, (start_x, y), (end_x, y), 2)
 
                     # Draw main arrow line
                     angle = 0 if mag_dir > 0 else math.pi
@@ -309,10 +309,11 @@ class FluidGrid:
                     # print(left_y - y)
                     # print(y - right_y)
 
-                    pygame.draw.polygon(
+                    pygame.draw.aalines(
                         self.screen,
                         color,
-                        [(end_x, y), (left_x, left_y), (right_x, right_y)],
+                        points=[(end_x, y), (left_x, left_y), (right_x, right_y)],
+                        closed=True
                     )
 
             # Vertical Velocity
@@ -335,7 +336,7 @@ class FluidGrid:
                     start_y = i * self.cell_size
                     end_y = start_y + scale * mag_dir
 
-                    pygame.draw.line(self.screen, color, (x, start_y), (x, end_y), 2)
+                    pygame.draw.aaline(self.screen, color, (x, start_y), (x, end_y), 2)
 
                     # Draw main arrow line
                     angle = math.pi / 2 if mag_dir > 0 else -math.pi / 2
@@ -343,17 +344,18 @@ class FluidGrid:
                     spread = math.radians(25)  # angle between the two sides
 
                     # # Compute the two base points of the triangle
-                    left_x = end_x - tip_len * math.cos(angle - spread)
-                    left_y = y - tip_len * math.sin(angle - spread)
-                    right_x = end_x - tip_len * math.cos(angle + spread)
-                    right_y = y - tip_len * math.sin(angle + spread)
+                    left_x = x - tip_len * math.cos(angle - spread)
+                    left_y = end_y - tip_len * math.sin(angle - spread)
+                    right_x = x - tip_len * math.cos(angle + spread)
+                    right_y = end_y - tip_len * math.sin(angle + spread)
                     # print(left_y - y)
                     # print(y - right_y)
 
-                    pygame.draw.polygon(
+                    pygame.draw.aalines(
                         self.screen,
                         color,
-                        [(end_x, y), (left_x, left_y), (right_x, right_y)],
+                        points=[(x, end_y), (left_x, left_y), (right_x, right_y)],
+                        closed=True
                     )
 
         pygame.display.flip()
