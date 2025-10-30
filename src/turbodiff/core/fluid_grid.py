@@ -390,7 +390,7 @@ class FluidGrid:
                 neighbors.append(pressure[i + 1][j])
             return neighbors
         
-        h = 1 / max(self.height, self.width)
+        h = 2 / max(self.height, self.width)
 
         for _ in range(20): # Gauss Seidel iterations
             for i in range(self.height):
@@ -403,14 +403,14 @@ class FluidGrid:
                 # Horizontal velocities
                 p_right = pressure[i][j]
                 p_left = pressure[i][j - 1]
-                self.velocities_x[i][j] -= (p_right - p_left) / h
+                self.velocities_x[i][j] -= (p_right - p_left) * h * h
                 
         for i in range(1, self.height):
             for j in range(1, self.width - 1):
                 # Vertical velocities
                 p_down = pressure[i][j]
                 p_up = pressure[i - 1][j]
-                self.velocities_y[i][j] -= (p_up - p_down) / h
+                self.velocities_y[i][j] -= (p_up - p_down) * h * h
 
     def _draw_grid(self):
         self.screen.fill((0, 0, 0))  # clear background
@@ -431,7 +431,7 @@ class FluidGrid:
                         color = (val, val, val)
                     elif self.show_cell_property == "divergence":
                         div = self._get_divergence(y, x)
-                        color = (max(0, min(255, int(div * 127))), 0, max(0, min(255, int(-div * 127))))
+                        color = (max(0, min(255, int(div))), 0, max(0, min(255, int(-div))))
                 rect = pygame.Rect(
                     x * self.cell_size,
                     y * self.cell_size,
