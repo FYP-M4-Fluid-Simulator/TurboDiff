@@ -10,8 +10,10 @@ class FluidGrid:
     """
     MAC Grid representation: The grid is made up of cells and cell edges. Density is stored in cells. Velocity is stored on edges
     Grid size is height * Width
-    dt: represents size of timestep
+    dt: represents size of timestep in seconds
     sources: list of points which are a source, and then amount of flow coming from those cells
+    cell size: represents height/width of each cell in metres
+    velcoities stored on cell edges as metres per second
     """
 
     grid: list[list[FluidCell]]
@@ -25,6 +27,7 @@ class FluidGrid:
         self,
         height: int,
         width: int,
+        cell_size: float,
         diffusion: float,
         viscosity: float,
         dt: float,
@@ -39,6 +42,7 @@ class FluidGrid:
     ):
         self.height = height
         self.width = width
+        self.cell_size = cell_size
         self.dt = dt
 
         self.visualise = visualise
@@ -69,9 +73,9 @@ class FluidGrid:
         if self.visualise:  # if visualising in pygame then initialise
             pygame.init()
             pygame.display.set_caption("Fluid Simulation")
-            self.cell_size = 1000 // max(self.height, self.width)
+            self.display_size = 1000 // max(self.height, self.width)
             self.screen = pygame.display.set_mode(
-                (self.width * self.cell_size, self.height * self.cell_size)
+                (self.width * self.display_size, self.height * self.display_size)
             )
             self.clock = pygame.time.Clock()
 
@@ -115,13 +119,13 @@ class FluidGrid:
             # Add a circular/vortex flow pattern
             center_i = self.height // 2
             center_j = self.width // 2
-
+            
             for i in range(self.height):
                 for j in range(self.width + 1):
                     # Horizontal velocities - create circular flow
                     di = i - center_i
                     dj = j - center_j
-                    dist = max(0.1, (di**2 + dj**2) ** 0.5)
+                    dist = max(0.001, (di**2 + dj**2) ** 0.5)
                     # Circular flow: velocity perpendicular to radius
                     self.velocities_x[i][j] = -di / dist * 2.0
 
@@ -156,8 +160,8 @@ class FluidGrid:
                         mx, my = pygame.mouse.get_pos()
 
                         # Convert to grid coordinates
-                        j = mx // self.cell_size
-                        i = my // self.cell_size
+                        j = mx // self.display_size
+                        i = my // self.display_size
 
                         cell_edges = self.grid[i][j].get_edges_index()
                         print(f"Clicked cell: ({i}, {j})")
@@ -174,7 +178,7 @@ class FluidGrid:
 
             if self.visualise:  # move visualisation forward
                 self._draw_grid()
-                self.clock.tick(30)
+                self.clock.tick(30) # framerate
 
             step += 1
 
@@ -200,8 +204,8 @@ class FluidGrid:
 
     def _dens_diffuse(self):
         a = (
-            self.dt * self.diffusion * self.height * self.width
-        )  # controls rate of approach/equalisation
+            self.dt * self.diffusion / (self.cell_size * self.cell_size)
+        )  # controls rate of approach/equalisation -> faster if timesteps larger, diffusion higher, cell size smaller
         for _ in range(
             20
         ):  # Iterations of Gauss Siedel -> Since matrix is sparse, we don't build it explicitly -> since we don't build it explicitly, we can't use utils method
@@ -226,7 +230,7 @@ class FluidGrid:
         N = (
             max(self.height, self.width) - 2
         )  # Internal grid size (excluding boundaries)
-        dt0 = self.dt * N
+        dt0 = self.dt / self.cell_size # used to determine how many cells we need to go back -> since speed is in m/s, so we need to go more cells back if cells are smaller
 
         for i in range(1, self.height - 1):
             for j in range(1, self.width - 1):
@@ -369,10 +373,10 @@ class FluidGrid:
         div -= self.velocities_x[vel_edges[0][0]][vel_edges[0][1]] # left edge
         div += self.velocities_y[vel_edges[2][0]][vel_edges[2][1]] # up edge
         div -= self.velocities_y[vel_edges[3][0]][vel_edges[3][1]] # down edge
-        return div * max(self.height, self.width)
+        return div / self.cell_size 
     
     def _vel_project(self):
-        pressure = [
+        self._pressure = [
             [0.0 for _ in range(self.width)] for _ in range(self.height)
         ]
         
@@ -381,36 +385,34 @@ class FluidGrid:
                 return []
             neighbors = []
             if j > 0 and not self.grid[i][j - 1].is_solid: # left
-                neighbors.append(pressure[i][j - 1])
+                neighbors.append(self._pressure[i][j - 1])
             if j < self.width - 1 and not self.grid[i][j + 1].is_solid: # right
-                neighbors.append(pressure[i][j + 1])
+                neighbors.append(self._pressure[i][j + 1])
             if i > 0 and not self.grid[i - 1][j].is_solid: # up
-                neighbors.append(pressure[i - 1][j])
+                neighbors.append(self._pressure[i - 1][j])
             if i < self.height - 1 and not self.grid[i + 1][j].is_solid: # down
-                neighbors.append(pressure[i + 1][j])
+                neighbors.append(self._pressure[i + 1][j])
             return neighbors
         
-        h = 2 / max(self.height, self.width)
-
-        for _ in range(20): # Gauss Seidel iterations
-            for i in range(self.height):
-                for j in range(self.width):
+        for _ in range(30): # Gauss Seidel iterations
+            for i in range(1, self.height - 1):
+                for j in range(1, self.width - 1):
                     pressures = get_pressures(i, j)
-                    pressure[i][j] = (sum(pressures) - self._get_divergence(i, j)) / len(pressures) if pressures else 0.0
+                    self._pressure[i][j] = (sum(pressures) - (self._get_divergence(i, j) * self.cell_size * self.cell_size / self.dt)) / len(pressures) if pressures else 0.0
 
         for i in range(1, self.height - 1):
-            for j in range(1, self.width):
+            for j in range(1, self.width - 1):
                 # Horizontal velocities
-                p_right = pressure[i][j]
-                p_left = pressure[i][j - 1]
-                self.velocities_x[i][j] -= (p_right - p_left) * h * h
+                p_right = self._pressure[i][j+1]
+                p_left = self._pressure[i][j - 1]
+                self.velocities_x[i][j] -= (p_right - p_left) * self.dt / (2 * self.cell_size)
                 
-        for i in range(1, self.height):
+        for i in range(1, self.height - 1):
             for j in range(1, self.width - 1):
                 # Vertical velocities
-                p_down = pressure[i][j]
-                p_up = pressure[i - 1][j]
-                self.velocities_y[i][j] -= (p_up - p_down) * h * h
+                p_down = self._pressure[i + 1][j]
+                p_up = self._pressure[i - 1][j]
+                self.velocities_y[i][j] -= (p_up - p_down) * self.dt / (2 * self.cell_size)
 
     def _draw_grid(self):
         self.screen.fill((0, 0, 0))  # clear background
@@ -432,11 +434,15 @@ class FluidGrid:
                     elif self.show_cell_property == "divergence":
                         div = self._get_divergence(y, x)
                         color = (max(0, min(255, int(div))), 0, max(0, min(255, int(-div))))
+                    elif self.show_cell_property == "pressure":
+                        # print(self._pressure)
+                        pressure = self._pressure[y][x]
+                        color = (max(0, min(255, int(200 * pressure))), 0, max(0, min(255, int(200 * -pressure))))
                 rect = pygame.Rect(
-                    x * self.cell_size,
-                    y * self.cell_size,
-                    self.cell_size,
-                    self.cell_size,
+                    x * self.display_size,
+                    y * self.display_size,
+                    self.display_size,
+                    self.display_size,
                 )
                 pygame.draw.rect(self.screen, color, rect)
 
@@ -466,11 +472,11 @@ class FluidGrid:
                         b = int(255 * (1 - mag))
                         color = (r, g, b)
                         # Scale arrow as per grid size for visibility
-                        scale = self.cell_size * 0.4
+                        scale = self.display_size * 0.4
 
                         # Arrow end points
-                        start_x = (j + 0.5) * self.cell_size
-                        start_y = (i + 0.5) * self.cell_size
+                        start_x = (j + 0.5) * self.display_size
+                        start_y = (i + 0.5) * self.display_size
                         end_x = start_x + scale * mag_dir_x
                         end_y = start_y + scale * mag_dir_y
 
@@ -511,12 +517,12 @@ class FluidGrid:
                         b = int(255 * (1 - abs(mag_dir)))
                         color = (r, g, b)
                         # Scale arrow as per grid size for visibility
-                        scale = self.cell_size * 0.4
+                        scale = self.display_size * 0.4
 
                         # Arrow end points
-                        start_x = j * self.cell_size
+                        start_x = j * self.display_size
                         end_x = start_x + scale * mag_dir
-                        y = (i + 0.5) * self.cell_size
+                        y = (i + 0.5) * self.display_size
 
                         pygame.draw.aaline(self.screen, color, (start_x, y), (end_x, y), 2)
 
@@ -553,11 +559,11 @@ class FluidGrid:
                         b = int(255 * (1 - abs(mag_dir)))
                         color = (r, g, b)
                         # Scale arrow as per grid size for visibility
-                        scale = self.cell_size * 0.4
+                        scale = self.display_size * 0.4
 
                         # Arrow end points
-                        x = (j + 0.5) * self.cell_size
-                        start_y = i * self.cell_size
+                        x = (j + 0.5) * self.display_size
+                        start_y = i * self.display_size
                         end_y = start_y + scale * mag_dir
 
                         pygame.draw.aaline(self.screen, color, (x, start_y), (x, end_y), 2)
@@ -623,6 +629,7 @@ if __name__ == "__main__":
     grid = FluidGrid(
         height=50,
         width=50,
+        cell_size=0.01,
         diffusion=0.01,
         viscosity=0,
         dt=0.02,
