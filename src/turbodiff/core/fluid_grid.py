@@ -4,6 +4,7 @@ import pygame
 
 # import numpy as np
 from turbodiff.core.fluid_cell import FluidCell
+from typing import Callable
 
 
 class FluidGrid:
@@ -34,6 +35,7 @@ class FluidGrid:
         sources: list[
             tuple[int, int, float]
         ],  # list of x,y positions for sources of dye
+        sdf: Callable[[int, int], float] | None = None,
         field_type: str = "zero",
         visualise: bool = False,
         show_cell_property: str = "density",
@@ -57,7 +59,7 @@ class FluidGrid:
         self.grid = [
             [
                 FluidCell(
-                    (i, j), 0, i == 0 or i == height - 1 or j == 0 or j == width - 1
+                    (i, j), 0, (i == 0 or i == height - 1 or j == 0 or j == width - 1) or (sdf is not None and sdf(i, j) < 0)
                 )
                 for j in range(width)
             ]
@@ -136,6 +138,35 @@ class FluidGrid:
                     dj = j - center_j
                     dist = max(0.1, (di**2 + dj**2) ** 0.5)
                     self.velocities_y[i][j] = dj / dist * 2.0
+
+            # Zero out velocities at solid boundaries
+            for i in range(self.height):
+                for j in range(self.width):
+                    if self.grid[i][j].is_solid:
+                        vels = self.grid[i][j].get_edges_index()
+                        # print(vels)
+                        self.velocities_x[vels[0][0]][vels[0][1]] = 0
+                        self.velocities_x[vels[1][0]][vels[1][1]] = 0
+                        self.velocities_y[vels[2][0]][vels[2][1]] = 0
+                        self.velocities_y[vels[3][0]][vels[3][1]] = 0
+        
+        elif field_type == "wind tunnel": # Set left to right flow
+            # initialize velocity lists
+            self.velocities_x = [
+                [0.0 for _ in range(self.width + 1)] for _ in range(self.height)
+            ]
+            self.velocities_y = [
+                [0.0 for _ in range(self.width)] for _ in range(self.height + 1)
+            ]
+            
+            # Add a circular/vortex flow pattern
+            center_i = self.height // 2
+            center_j = self.width // 2
+            
+            for i in range(self.height):
+                for j in range(self.width + 1):
+                    # Horizontal velocities
+                    self.velocities_x[i][j] = 2.0  # constant rightward flow
 
             # Zero out velocities at solid boundaries
             for i in range(self.height):
@@ -634,6 +665,9 @@ class FluidGrid:
         return u, v
 
 
+def f(x, y):
+    return ((x - 25)**2 + (y - 25)**2)**1/2 - 10
+
 if __name__ == "__main__":
     grid = FluidGrid(
         height=50,
@@ -642,10 +676,11 @@ if __name__ == "__main__":
         diffusion=0.01,
         viscosity=0,
         dt=0.02,
-        sources=[(10, 25, 100)],
-        field_type="random",
+        sources=[(25, 15, 100)],
+        # sdf=f,
+        field_type="spiral",
         visualise=True,
-        show_cell_property="pressure",
+        show_cell_property="density",
         show_velocity=True,
         show_cell_centered_velocity=True,
     )
