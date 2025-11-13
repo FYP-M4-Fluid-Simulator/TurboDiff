@@ -9,7 +9,7 @@ from turbodiff.core.fluid_cell import FluidCell
 class FluidGrid:
     """
     MAC Grid representation: The grid is made up of cells and cell edges. Density is stored in cells. Velocity is stored on edges
-    Grid size is height * Width
+    Grid size is height * width
     dt: represents size of timestep in seconds
     sources: list of points which are a source, and then amount of flow coming from those cells
     cell size: represents height/width of each cell in metres
@@ -369,10 +369,10 @@ class FluidGrid:
     def _get_divergence(self, i, j):
         div = 0.0
         vel_edges = self.grid[i][j].get_edges_index()
-        div += self.velocities_x[vel_edges[1][0]][vel_edges[1][1]] # right edge
-        div -= self.velocities_x[vel_edges[0][0]][vel_edges[0][1]] # left edge
-        div += self.velocities_y[vel_edges[2][0]][vel_edges[2][1]] # up edge
-        div -= self.velocities_y[vel_edges[3][0]][vel_edges[3][1]] # down edge
+        div -= self.velocities_x[vel_edges[0][0]][vel_edges[0][1]] # left edge - in
+        div += self.velocities_x[vel_edges[1][0]][vel_edges[1][1]] # right edge - out
+        div -= self.velocities_y[vel_edges[2][0]][vel_edges[2][1]] # up edge - in
+        div += self.velocities_y[vel_edges[3][0]][vel_edges[3][1]] # down edge - out
         return div / self.cell_size 
     
     def _vel_project(self):
@@ -395,24 +395,33 @@ class FluidGrid:
             return neighbors
         
         for _ in range(30): # Gauss Seidel iterations
-            for i in range(1, self.height - 1):
-                for j in range(1, self.width - 1):
-                    pressures = get_pressures(i, j)
-                    self._pressure[i][j] = (sum(pressures) - (self._get_divergence(i, j) * self.cell_size * self.cell_size / self.dt)) / len(pressures) if pressures else 0.0
+            for i in range(self.height):
+                for j in range(self.width):
+                    if self.grid[i][j].is_solid: 
+                        self._pressure[i][j] = 0
+                    else:
+                        pressures = get_pressures(i, j)
+                        self._pressure[i][j] = ((sum(pressures) - (self._get_divergence(i, j) * self.cell_size * self.cell_size / self.dt)) / len(pressures)) if pressures else 0.0
 
-        for i in range(1, self.height - 1):
-            for j in range(1, self.width - 1):
+        for i in range(self.height):
+            for j in range(1, self.width):
                 # Horizontal velocities
-                p_right = self._pressure[i][j+1]
-                p_left = self._pressure[i][j - 1]
-                self.velocities_x[i][j] -= (p_right - p_left) * self.dt / (2 * self.cell_size)
+                if self.grid[i][j - 1].is_solid or self.grid[i][j].is_solid:
+                    continue
                 
-        for i in range(1, self.height - 1):
-            for j in range(1, self.width - 1):
+                p_right = self._pressure[i][j]
+                p_left = self._pressure[i][j - 1]
+                self.velocities_x[i][j] -= (p_right - p_left) * self.dt / self.cell_size
+                
+        for i in range(1, self.height):
+            for j in range(self.width):
                 # Vertical velocities
-                p_down = self._pressure[i + 1][j]
-                p_up = self._pressure[i - 1][j]
-                self.velocities_y[i][j] -= (p_up - p_down) * self.dt / (2 * self.cell_size)
+                if self.grid[i - 1][j].is_solid or self.grid[i][j].is_solid:
+                    continue
+                
+                p_down = self._pressure[i][j]
+                p_up = self._pressure[i-1][j]
+                self.velocities_y[i][j] -= (p_down - p_up) * self.dt / self.cell_size
 
     def _draw_grid(self):
         self.screen.fill((0, 0, 0))  # clear background
@@ -634,9 +643,9 @@ if __name__ == "__main__":
         viscosity=0,
         dt=0.02,
         sources=[(10, 25, 100)],
-        field_type="spiral",
+        field_type="random",
         visualise=True,
-        show_cell_property="divergence",
+        show_cell_property="pressure",
         show_velocity=True,
         show_cell_centered_velocity=True,
     )
