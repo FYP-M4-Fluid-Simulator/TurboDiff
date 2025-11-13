@@ -18,9 +18,13 @@ class FluidGrid:
     """
 
     grid: list[list[FluidCell]]
-    velocities_x: list[list[float]]  # horizontal velocities on vertical edges -> positive is to right
-    velocities_y: list[list[float]]  # vertical velocities on horizontal edges -> positive is downwards
-    
+    velocities_x: list[
+        list[float]
+    ]  # horizontal velocities on vertical edges -> positive is to right
+    velocities_y: list[
+        list[float]
+    ]  # vertical velocities on horizontal edges -> positive is downwards
+
     next_velocities_x: list[list[float]]  # horizontal velocities on vertical edges
     next_velocities_y: list[list[float]]  # vertical velocities on horizontal edges
 
@@ -49,7 +53,7 @@ class FluidGrid:
 
         self.visualise = visualise
         self.show_cell_property = show_cell_property
-        
+
         self.show_velocity = show_velocity
         self.show_cell_centered_velocity = show_cell_centered_velocity
 
@@ -59,13 +63,16 @@ class FluidGrid:
         self.grid = [
             [
                 FluidCell(
-                    (i, j), 0, (i == 0 or i == height - 1 or j == 0 or j == width - 1) or (sdf is not None and sdf(i, j) < 0)
+                    (i, j),
+                    0,
+                    (i == 0 or i == height - 1 or j == 0 or j == width - 1)
+                    or (sdf is not None and sdf(i, j) < 0),
                 )
                 for j in range(width)
             ]
             for i in range(height)
         ]  # create 2d grid with all cells at density 0
-        
+
         # Set velocity field
         self.set_velocity_field(field_type)
 
@@ -82,15 +89,21 @@ class FluidGrid:
             self.clock = pygame.time.Clock()
 
     def set_velocity_field(self, field_type: str = "zero"):
-        if field_type == "zero": # Set all velocities to zero
+        if field_type == "zero":  # Set all velocities to zero
             self.velocities_x = [
                 [0.0 for _ in range(self.width + 1)] for _ in range(self.height)
             ]
             self.velocities_y = [
                 [0.0 for _ in range(self.width)] for _ in range(self.height + 1)
             ]
-            
-        elif field_type == "random": # Set random velocities
+            self.next_velocities_x = [
+                [0.0 for _ in range(self.width + 1)] for _ in range(self.height)
+            ]
+            self.next_velocities_y = [
+                [0.0 for _ in range(self.width)] for _ in range(self.height + 1)
+            ]
+
+        elif field_type == "random":  # Set random velocities
             self.velocities_x = [
                 [random.random() - 0.5 for _ in range(self.width + 1)]
                 for _ in range(self.height)
@@ -98,6 +111,12 @@ class FluidGrid:
             self.velocities_y = [
                 [random.random() - 0.5 for _ in range(self.width)]
                 for _ in range(self.height + 1)
+            ]
+            self.next_velocities_x = [
+                [0.0 for _ in range(self.width + 1)] for _ in range(self.height)
+            ]
+            self.next_velocities_y = [
+                [0.0 for _ in range(self.width)] for _ in range(self.height + 1)
             ]
 
             for i in range(self.height):
@@ -108,8 +127,8 @@ class FluidGrid:
                         self.velocities_x[vels[1][0]][vels[1][1]] = 0
                         self.velocities_y[vels[2][0]][vels[2][1]] = 0
                         self.velocities_y[vels[3][0]][vels[3][1]] = 0
-        
-        elif field_type == "spiral": # Set spiral/circular velocity field
+
+        elif field_type == "spiral":  # Set spiral/circular velocity field
             # initialize velocity lists
             self.velocities_x = [
                 [0.0 for _ in range(self.width + 1)] for _ in range(self.height)
@@ -117,11 +136,17 @@ class FluidGrid:
             self.velocities_y = [
                 [0.0 for _ in range(self.width)] for _ in range(self.height + 1)
             ]
-            
+            self.next_velocities_x = [
+                [0.0 for _ in range(self.width + 1)] for _ in range(self.height)
+            ]
+            self.next_velocities_y = [
+                [0.0 for _ in range(self.width)] for _ in range(self.height + 1)
+            ]
+
             # Add a circular/vortex flow pattern
             center_i = self.height // 2
             center_j = self.width // 2
-            
+
             for i in range(self.height):
                 for j in range(self.width + 1):
                     # Horizontal velocities - create circular flow
@@ -149,8 +174,8 @@ class FluidGrid:
                         self.velocities_x[vels[1][0]][vels[1][1]] = 0
                         self.velocities_y[vels[2][0]][vels[2][1]] = 0
                         self.velocities_y[vels[3][0]][vels[3][1]] = 0
-        
-        elif field_type == "wind tunnel": # Set left to right flow
+
+        elif field_type == "wind tunnel":  # Set left to right flow
             # initialize velocity lists
             self.velocities_x = [
                 [0.0 for _ in range(self.width + 1)] for _ in range(self.height)
@@ -158,11 +183,17 @@ class FluidGrid:
             self.velocities_y = [
                 [0.0 for _ in range(self.width)] for _ in range(self.height + 1)
             ]
-            
+            self.next_velocities_x = [
+                [0.0 for _ in range(self.width + 1)] for _ in range(self.height)
+            ]
+            self.next_velocities_y = [
+                [0.0 for _ in range(self.width)] for _ in range(self.height + 1)
+            ]
+
             # Add a circular/vortex flow pattern
             center_i = self.height // 2
             center_j = self.width // 2
-            
+
             for i in range(self.height):
                 for j in range(self.width + 1):
                     # Horizontal velocities
@@ -209,7 +240,7 @@ class FluidGrid:
 
             if self.visualise:  # move visualisation forward
                 self._draw_grid()
-                self.clock.tick(30) # framerate
+                self.clock.tick(30)  # framerate
 
             step += 1
 
@@ -228,10 +259,8 @@ class FluidGrid:
         # As per Joe Stam paper -> but note that we represent velocities on edges so we have to handle it slightly differently -> more similar to Sebastian's vid
         # self._vel_add_source() -> TODO - should be partly generalisable from density work
         # self._vel_diffuse() -> TODO? - should be partly generalisable from density work -> not needed for inviscid/non-viscous (suitable simplification for air I believe) fluids so left for now
-        # self._vel_project() # only uncomment if anything above is implemented
-        # self._vel_advect() # -> TODO - should work directly for spiral field, so let's test?
-        self._vel_project() # remove curl -> TODO
-        pass
+        self._vel_advect()  # Self-advection: velocity field advects itself
+        self._vel_project()  # Remove divergence (make incompressible)
 
     def _dens_diffuse(self):
         a = (
@@ -258,10 +287,12 @@ class FluidGrid:
         Follows particles backward in time through the velocity field.
         Uses face-centered velocities (MAC grid).
         """
-        N = (
-            max(self.height, self.width) - 2
-        )  # Internal grid size (excluding boundaries)
-        dt0 = self.dt / self.cell_size # used to determine how many cells we need to go back -> since speed is in m/s, so we need to go more cells back if cells are smaller
+        # N = (
+        #     max(self.height, self.width) - 2
+        # )  # Internal grid size (excluding boundaries)
+        dt0 = (
+            self.dt / self.cell_size
+        )  # used to determine how many cells we need to go back -> since speed is in m/s, so we need to go more cells back if cells are smaller
 
         for i in range(1, self.height - 1):
             for j in range(1, self.width - 1):
@@ -277,30 +308,28 @@ class FluidGrid:
                 # Clamp to grid boundaries
                 x = max(0.5, min(self.width - 1.5, x))
                 y = max(0.5, min(self.height - 1.5, y))
-                
+
                 # Adjust for cell centres being at (i+0.5, j+0.5)
                 x -= 0.5
                 y -= 0.5
 
                 # Get integer and fractional parts for bilinear interpolation
-                i0 = int(y) 
+                i0 = int(y)
                 i1 = i0 + 1
-                j0 = int(x) 
+                j0 = int(x)
                 j1 = j0 + 1
 
                 # Interpolation weights
-                s1 = x - j0 
+                s1 = x - j0
                 s0 = 1 - s1
                 t1 = y - i0
                 t0 = 1 - t1
 
                 # Bilinear interpolation
                 self.grid[i][j].next_density = s0 * (
-                    t0 * self.grid[i0][j0].density
-                    + t1 * self.grid[i1][j0].density
+                    t0 * self.grid[i0][j0].density + t1 * self.grid[i1][j0].density
                 ) + s1 * (
-                    t0 * self.grid[i0][j1].density
-                    + t1 * self.grid[i1][j1].density
+                    t0 * self.grid[i0][j1].density + t1 * self.grid[i1][j1].density
                 )
 
         # Update cells and apply boundary conditions
@@ -315,7 +344,9 @@ class FluidGrid:
         # Left and right boundaries
         for i in range(1, self.height - 1):
             self.grid[i][0].next_density = self.grid[i][1].next_density
-            self.grid[i][self.width - 1].next_density = self.grid[i][self.width - 2].next_density
+            self.grid[i][self.width - 1].next_density = self.grid[i][
+                self.width - 2
+            ].next_density
 
         # Top and bottom boundaries
         for j in range(1, self.width - 1):
@@ -329,7 +360,8 @@ class FluidGrid:
             self.grid[1][0].next_density + self.grid[0][1].next_density
         )
         self.grid[0][self.width - 1].next_density = 0.5 * (
-            self.grid[1][self.width - 1].next_density + self.grid[0][self.width - 2].next_density
+            self.grid[1][self.width - 1].next_density
+            + self.grid[0][self.width - 2].next_density
         )
         self.grid[self.height - 1][0].next_density = 0.5 * (
             self.grid[self.height - 2][0].next_density
@@ -346,112 +378,145 @@ class FluidGrid:
                 cell.add_source(self.dt)
         self._update_cells()
 
-    # def _vel_advect(self):
-    #     """
-    #     Advection of velocities using semi-Lagrangian method with bilinear interpolation.
-    #     Follows particles backward in time through the velocity field.
-    #     Uses face-centered velocities (MAC grid).
-    #     """
-    #     N = (
-    #         max(self.height, self.width) - 2
-    #     )  # Internal grid size (excluding boundaries)
-    #     dt0 = self.dt * N
+    def _vel_advect(self):
+        """
+        Advection of velocities using semi-Lagrangian method with bilinear interpolation.
+        Follows particles backward in time through the velocity field.
+        Uses face-centered velocities (MAC grid).
+        """
+        dt0 = (
+            self.dt / self.cell_size
+        )  # used to determine how many cells we need to go back
 
-    #     for i in range(1, self.height - 1):
-    #         for j in range(1, self.width - 1):
-    #             # Get velocity at cell center
-    #             x = j + 0.5
-    #             y = i + 0.5
-    #             u, v = self._get_velocity_at(x, y)
+        # Advect horizontal velocities (velocities_x) - sampled at left edge centers
+        for i in range(self.height):
+            for j in range(self.width + 1):
+                # Skip if adjacent to solid cells
+                if j > 0 and self.grid[i][j - 1].is_solid:
+                    self.next_velocities_x[i][j] = self.velocities_x[i][j]
+                    continue
+                if j < self.width and self.grid[i][j].is_solid:
+                    self.next_velocities_x[i][j] = self.velocities_x[i][j]
+                    continue
 
-    #             # Trace particle backward in time
-    #             x -= dt0 * u
-    #             y -= dt0 * v
+                # Sample at left edge center position (x=j, y=i+0.5 in grid coordinates)
+                x = j
+                y = i + 0.5
+                u, v = self._get_velocity_at(x, y)
 
-    #             # Clamp to grid boundaries
-    #             x = max(0.5, min(self.width - 1.5, x))
-    #             y = max(0.5, min(self.height - 1.5, y))
-                
-    #             # Adjust for cell centres being at (i+0.5, j+0.5)
-    #             x -= 0.5
-    #             y -= 0.5
+                # Trace particle backward in time
+                x -= dt0 * u
+                y -= dt0 * v
 
-    #             # Get integer and fractional parts for bilinear interpolation
-    #             i0 = int(y) 
-    #             i1 = i0 + 1
-    #             j0 = int(x) 
-    #             j1 = j0 + 1
+                # Sample velocity at the previous position
+                u_prev, _ = self._get_velocity_at(x, y)
+                self.next_velocities_x[i][j] = u_prev
 
-    #             # Interpolation weights
-    #             s1 = x - j0 
-    #             s0 = 1 - s1
-    #             t1 = y - i0
-    #             t0 = 1 - t1
+        # Advect vertical velocities (velocities_y) - sampled at bottom edge centers
+        for i in range(self.height + 1):
+            for j in range(self.width):
+                # Skip if adjacent to solid cells
+                if i > 0 and self.grid[i - 1][j].is_solid:
+                    self.next_velocities_y[i][j] = self.velocities_y[i][j]
+                    continue
+                if i < self.height and self.grid[i][j].is_solid:
+                    self.next_velocities_y[i][j] = self.velocities_y[i][j]
+                    continue
 
-    #             # Bilinear interpolation
-    #             self.grid[i][j].next_density = s0 * (
-    #                 t0 * self.grid[i0][j0].density
-    #                 + t1 * self.grid[i1][j0].density
-    #             ) + s1 * (
-    #                 t0 * self.grid[i0][j1].density
-    #                 + t1 * self.grid[i1][j1].density
-    #             )
-    
+                # Sample at bottom edge center position (x=j+0.5, y=i in grid coordinates)
+                x = j + 0.5
+                y = i
+                u, v = self._get_velocity_at(x, y)
+
+                # Trace particle backward in time
+                x -= dt0 * u
+                y -= dt0 * v
+
+                # Sample velocity at the previous position
+                _, v_prev = self._get_velocity_at(x, y)
+                self.next_velocities_y[i][j] = v_prev
+
+        # Update velocities from temporary arrays
+        self._update_velocities()
+
+    def _update_velocities(self):
+        """Copy next_velocities to current velocities"""
+        for i in range(self.height):
+            for j in range(self.width + 1):
+                self.velocities_x[i][j] = self.next_velocities_x[i][j]
+
+        for i in range(self.height + 1):
+            for j in range(self.width):
+                self.velocities_y[i][j] = self.next_velocities_y[i][j]
+
     def _get_divergence(self, i, j):
         div = 0.0
         vel_edges = self.grid[i][j].get_edges_index()
-        div -= self.velocities_x[vel_edges[0][0]][vel_edges[0][1]] # left edge - in
-        div += self.velocities_x[vel_edges[1][0]][vel_edges[1][1]] # right edge - out
-        div -= self.velocities_y[vel_edges[2][0]][vel_edges[2][1]] # up edge - in
-        div += self.velocities_y[vel_edges[3][0]][vel_edges[3][1]] # down edge - out
-        return div / self.cell_size 
-    
+        div -= self.velocities_x[vel_edges[0][0]][vel_edges[0][1]]  # left edge - in
+        div += self.velocities_x[vel_edges[1][0]][vel_edges[1][1]]  # right edge - out
+        div -= self.velocities_y[vel_edges[2][0]][vel_edges[2][1]]  # up edge - in
+        div += self.velocities_y[vel_edges[3][0]][vel_edges[3][1]]  # down edge - out
+        return div / self.cell_size
+
     def _vel_project(self):
-        self._pressure = [
-            [0.0 for _ in range(self.width)] for _ in range(self.height)
-        ]
-        
+        self._pressure = [[0.0 for _ in range(self.width)] for _ in range(self.height)]
+
         def get_pressures(i, j):
             if self.grid[i][j].is_solid:
                 return []
             neighbors = []
-            if j > 0 and not self.grid[i][j - 1].is_solid: # left
+            if j > 0 and not self.grid[i][j - 1].is_solid:  # left
                 neighbors.append(self._pressure[i][j - 1])
-            if j < self.width - 1 and not self.grid[i][j + 1].is_solid: # right
+            if j < self.width - 1 and not self.grid[i][j + 1].is_solid:  # right
                 neighbors.append(self._pressure[i][j + 1])
-            if i > 0 and not self.grid[i - 1][j].is_solid: # up
+            if i > 0 and not self.grid[i - 1][j].is_solid:  # up
                 neighbors.append(self._pressure[i - 1][j])
-            if i < self.height - 1 and not self.grid[i + 1][j].is_solid: # down
+            if i < self.height - 1 and not self.grid[i + 1][j].is_solid:  # down
                 neighbors.append(self._pressure[i + 1][j])
             return neighbors
-        
-        for _ in range(30): # Gauss Seidel iterations
+
+        for _ in range(30):  # Gauss Seidel iterations
             for i in range(self.height):
                 for j in range(self.width):
-                    if self.grid[i][j].is_solid: 
+                    if self.grid[i][j].is_solid:
                         self._pressure[i][j] = 0
                     else:
                         pressures = get_pressures(i, j)
-                        self._pressure[i][j] = ((sum(pressures) - (self._get_divergence(i, j) * self.cell_size * self.cell_size / self.dt)) / len(pressures)) if pressures else 0.0
+                        self._pressure[i][j] = (
+                            (
+                                (
+                                    sum(pressures)
+                                    - (
+                                        self._get_divergence(i, j)
+                                        * self.cell_size
+                                        * self.cell_size
+                                        / self.dt
+                                    )
+                                )
+                                / len(pressures)
+                            )
+                            if pressures
+                            else 0.0
+                        )
 
         for i in range(self.height):
             for j in range(1, self.width):
                 # Horizontal velocities
                 if self.grid[i][j - 1].is_solid or self.grid[i][j].is_solid:
                     continue
-                
+
                 p_right = self._pressure[i][j]
                 p_left = self._pressure[i][j - 1]
                 self.velocities_x[i][j] -= (p_right - p_left) * self.dt / self.cell_size
-                
+
         for i in range(1, self.height):
             for j in range(self.width):
                 # Vertical velocities
                 if self.grid[i - 1][j].is_solid or self.grid[i][j].is_solid:
                     continue
-                
+
                 p_down = self._pressure[i][j]
-                p_up = self._pressure[i-1][j]
+                p_up = self._pressure[i - 1][j]
                 self.velocities_y[i][j] -= (p_down - p_up) * self.dt / self.cell_size
 
     def _draw_grid(self):
@@ -468,16 +533,30 @@ class FluidGrid:
                         val = max(
                             GRAY_VALUE,
                             GRAY_VALUE
-                            + min(255 - GRAY_VALUE, int(cell.density * (255 - GRAY_VALUE))),
+                            + min(
+                                255 - GRAY_VALUE, int(cell.density * (255 - GRAY_VALUE))
+                            ),
                         )
                         color = (val, val, val)
                     elif self.show_cell_property == "divergence":
                         div = self._get_divergence(y, x)
-                        color = (max(0, min(255, int(div))), 0, max(0, min(255, int(-div))))
+                        color = (
+                            max(0, min(255, int(div))),
+                            0,
+                            max(0, min(255, int(-div))),
+                        )
                     elif self.show_cell_property == "pressure":
                         # print(self._pressure)
                         pressure = self._pressure[y][x]
-                        color = (max(0, min(255, int(200 * pressure))), 0, max(0, min(255, int(200 * -pressure))))
+                        color = (
+                            max(0, min(255, int(200 * pressure))),
+                            0,
+                            max(0, min(255, int(200 * -pressure))),
+                        )
+                    elif self.show_cell_property == "advection":
+                        # Show neutral background to highlight velocity arrows
+                        GRAY_VALUE = 30
+                        color = (GRAY_VALUE, GRAY_VALUE, GRAY_VALUE)
                 rect = pygame.Rect(
                     x * self.display_size,
                     y * self.display_size,
@@ -523,33 +602,39 @@ class FluidGrid:
                         pygame.draw.aaline(
                             self.screen, color, (start_x, start_y), (end_x, end_y), 2
                         )
-                        
+
                         # Draw main arrow line
                         angle = math.atan2(mag_dir_y, mag_dir_x)
                         tip_len = scale * mag / 2  # height of arrowhead sides
                         spread = math.radians(25)  # angle between the two sides
-                        
+
                         # compute the two base points of the triangle
                         left_x = end_x - tip_len * math.cos(angle - spread)
                         left_y = end_y - tip_len * math.sin(angle - spread)
                         right_x = end_x - tip_len * math.cos(angle + spread)
                         right_y = end_y - tip_len * math.sin(angle + spread)
-                        
+
                         pygame.draw.aalines(
                             self.screen,
                             color,
-                            points=[(end_x, end_y), (left_x, left_y), (right_x, right_y)],
-                            closed=True
+                            points=[
+                                (end_x, end_y),
+                                (left_x, left_y),
+                                (right_x, right_y),
+                            ],
+                            closed=True,
                         )
-                        
-            elif self.show_cell_centered_velocity == False:
+
+            elif not self.show_cell_centered_velocity:
                 # Velocity for each face
                 # Horizontal Velocity
                 for i in range(self.height):
                     for j in range(self.width + 1):
                         # Get and clamp velocity
                         mag_dir = self.velocities_x[i][j]
-                        mag_dir = min(1.0, mag_dir) if mag_dir > 0 else max(-1.0, mag_dir)
+                        mag_dir = (
+                            min(1.0, mag_dir) if mag_dir > 0 else max(-1.0, mag_dir)
+                        )
 
                         # Map color based on magnitude
                         r = int(255 * abs(mag_dir))
@@ -564,7 +649,9 @@ class FluidGrid:
                         end_x = start_x + scale * mag_dir
                         y = (i + 0.5) * self.display_size
 
-                        pygame.draw.aaline(self.screen, color, (start_x, y), (end_x, y), 2)
+                        pygame.draw.aaline(
+                            self.screen, color, (start_x, y), (end_x, y), 2
+                        )
 
                         # Draw main arrow line
                         angle = 0 if mag_dir > 0 else math.pi
@@ -583,7 +670,7 @@ class FluidGrid:
                             self.screen,
                             color,
                             points=[(end_x, y), (left_x, left_y), (right_x, right_y)],
-                            closed=True
+                            closed=True,
                         )
 
                 # Vertical Velocity
@@ -591,7 +678,9 @@ class FluidGrid:
                     for j in range(self.width):
                         # Get and clamp velocity
                         mag_dir = self.velocities_y[i][j]
-                        mag_dir = min(1.0, mag_dir) if mag_dir > 0 else max(-1.0, mag_dir)
+                        mag_dir = (
+                            min(1.0, mag_dir) if mag_dir > 0 else max(-1.0, mag_dir)
+                        )
 
                         # Map color based on magnitude
                         r = int(255 * abs(mag_dir))
@@ -606,7 +695,9 @@ class FluidGrid:
                         start_y = i * self.display_size
                         end_y = start_y + scale * mag_dir
 
-                        pygame.draw.aaline(self.screen, color, (x, start_y), (x, end_y), 2)
+                        pygame.draw.aaline(
+                            self.screen, color, (x, start_y), (x, end_y), 2
+                        )
 
                         # Draw main arrow line
                         angle = math.pi / 2 if mag_dir > 0 else -math.pi / 2
@@ -625,7 +716,7 @@ class FluidGrid:
                             self.screen,
                             color,
                             points=[(x, end_y), (left_x, left_y), (right_x, right_y)],
-                            closed=True
+                            closed=True,
                         )
 
         pygame.display.flip()
@@ -666,23 +757,24 @@ class FluidGrid:
 
 
 def f(x, y):
-    return ((x - 25)**2 + (y - 25)**2)**1/2 - 10
+    return ((x - 25) ** 2 + (y - 25) ** 2) ** 1 / 2 - 10
+
 
 if __name__ == "__main__":
     grid = FluidGrid(
         height=50,
         width=50,
         cell_size=0.01,
-        diffusion=0.01,
-        viscosity=0,
-        dt=0.02,
-        sources=[(25, 15, 100)],
+        diffusion=0.001,
+        viscosity=0.01,
+        dt=0.01,
+        sources=[(10, 15, 300)],
         # sdf=f,
-        field_type="spiral",
+        field_type="wind tunnel",
         visualise=True,
-        show_cell_property="density",
+        show_cell_property="advection",
         show_velocity=True,
-        show_cell_centered_velocity=True,
+        show_cell_centered_velocity=False,
     )
 
     grid.simulate()
