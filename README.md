@@ -15,6 +15,7 @@ A differentiable fluid simulation pipeline for Wind Turbine Shape Optimization
 1. Make a virtual environment for project using `python -m venv /path/to/venv`
 2. Install turbodiff in editable mode using `pip install -e '.[dev]'` from project root directory
 3. Run `pre-commit install`, this will ensure that your code is reformatted according to the Black formatter on commit
+4. Run `pre-commit run --all-files` to run black, Ruff, and prettier before committing
 
 # Testing
 

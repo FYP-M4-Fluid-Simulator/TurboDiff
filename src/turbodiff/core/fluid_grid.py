@@ -212,8 +212,24 @@ class FluidGrid:
 
     def simulate(self, steps: int = -1):
         step = 0
+        prev_mouse_pos = None  # Track previous mouse position for velocity calculation
+
         while step != steps:
             if self.visualise:
+                # Check if 'A' key is being held down
+                keys = pygame.key.get_pressed()
+                is_painting = keys[pygame.K_a]
+
+                # Get current mouse position
+                mouse_pos = pygame.mouse.get_pos()
+
+                # If 'A' is held and mouse moved, add velocity
+                if is_painting and prev_mouse_pos is not None:
+                    self._add_velocity_from_mouse(prev_mouse_pos, mouse_pos)
+
+                # Update previous mouse position
+                prev_mouse_pos = mouse_pos if is_painting else None
+
                 for event in pygame.event.get():  # allow exit
                     if event.type == pygame.QUIT:
                         return
@@ -244,7 +260,62 @@ class FluidGrid:
 
             step += 1
 
-    # private methods
+    def _add_velocity_from_mouse(self, prev_pos, curr_pos):
+        """
+        Add velocity to the grid based on mouse movement.
+        The velocity direction and magnitude are determined by mouse movement.
+        """
+        # Convert pixel positions to grid coordinates
+        prev_x, prev_y = prev_pos
+        curr_x, curr_y = curr_pos
+
+        # Calculate mouse velocity in pixels
+        dx_pixels = curr_x - prev_x
+        dy_pixels = curr_y - prev_y
+
+        # Convert to grid units (cells per frame)
+        dx_grid = dx_pixels / self.display_size
+        dy_grid = dy_pixels / self.display_size
+
+        # Scale velocity (adjust multiplier to control strength)
+        velocity_scale = 5.0
+        u_add = dx_grid * velocity_scale
+        v_add = dy_grid * velocity_scale
+
+        # Get current cell position
+        j = curr_x // self.display_size
+        i = curr_y // self.display_size
+
+        # Check bounds
+        if i < 1 or i >= self.height - 1 or j < 1 or j >= self.width - 1:
+            return
+
+        # Apply velocity to a brush area (3x3 cells for better visibility)
+        brush_radius = 1
+        for di in range(-brush_radius, brush_radius + 1):
+            for dj in range(-brush_radius, brush_radius + 1):
+                ni = i + di
+                nj = j + dj
+
+                # Check bounds
+                if ni < 1 or ni >= self.height - 1 or nj < 1 or nj >= self.width - 1:
+                    continue
+
+                # Skip solid cells
+                if self.grid[ni][nj].is_solid:
+                    continue
+
+                # Get cell edges
+                cell_edges = self.grid[ni][nj].get_edges_index()
+
+                # Add horizontal velocity to left and right edges
+                self.velocities_x[cell_edges[0][0]][cell_edges[0][1]] += u_add
+                self.velocities_x[cell_edges[1][0]][cell_edges[1][1]] += u_add
+
+                # Add vertical velocity to top and bottom edges
+                self.velocities_y[cell_edges[2][0]][cell_edges[2][1]] += v_add
+                self.velocities_y[cell_edges[3][0]][cell_edges[3][1]] += v_add
+
     def _update_cells(self):
         for i in range(self.height):
             for j in range(self.width):
@@ -719,6 +790,35 @@ class FluidGrid:
                             closed=True,
                         )
 
+        # cursor indicator when in painting mode
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_a]:
+            mouse_x, mouse_y = pygame.mouse.get_pos()
+            # circle to show brush area
+            brush_radius_pixels = self.display_size * 1.5
+            pygame.draw.circle(
+                self.screen,
+                (0, 255, 0),
+                (mouse_x, mouse_y),
+                int(brush_radius_pixels),
+                2,
+            )
+            # crosshair
+            pygame.draw.line(
+                self.screen,
+                (0, 255, 0),
+                (mouse_x - 10, mouse_y),
+                (mouse_x + 10, mouse_y),
+                2,
+            )
+            pygame.draw.line(
+                self.screen,
+                (0, 255, 0),
+                (mouse_x, mouse_y - 10),
+                (mouse_x, mouse_y + 10),
+                2,
+            )
+
         pygame.display.flip()
 
     def _sample_bilinear(self, values, px, py, ny, nx):
@@ -745,13 +845,25 @@ class FluidGrid:
         return (1 - yfrac) * value_top + yfrac * value_bottom
 
     def _get_velocity_at(self, px, py):
-        if self.grid[int(py)][int(px)].is_solid:
+        # Clamp to valid range
+        px_clamped = max(0.0, min(px, self.width))
+        py_clamped = max(0.0, min(py, self.height))
+
+        # Check for solid at clamped position
+        grid_i = int(py_clamped)
+        grid_j = int(px_clamped)
+        if grid_i >= self.height:
+            grid_i = self.height - 1
+        if grid_j >= self.width:
+            grid_j = self.width - 1
+
+        if self.grid[grid_i][grid_j].is_solid:
             return 0.0, 0.0
         u = self._sample_bilinear(
-            self.velocities_x, px, py - 0.5, self.height, self.width + 1
+            self.velocities_x, px_clamped, py_clamped - 0.5, self.height, self.width + 1
         )
         v = self._sample_bilinear(
-            self.velocities_y, px - 0.5, py, self.height + 1, self.width
+            self.velocities_y, px_clamped - 0.5, py_clamped, self.height + 1, self.width
         )
         return u, v
 
@@ -772,7 +884,7 @@ if __name__ == "__main__":
         # sdf=f,
         field_type="wind tunnel",
         visualise=True,
-        show_cell_property="advection",
+        show_cell_property="density",
         show_velocity=True,
         show_cell_centered_velocity=False,
     )
