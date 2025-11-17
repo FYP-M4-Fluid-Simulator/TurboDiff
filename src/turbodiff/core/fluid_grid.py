@@ -491,8 +491,58 @@ class FluidGrid:
                 _, v_prev = self._get_velocity_at(x, y)
                 self.next_velocities_y[i][j] = v_prev
 
-        # Update velocities from temporary arrays
+        # Update velocities from temporary arrays and apply boundary conditions
         self._update_velocities()
+        self._vel_set_bnd()
+
+    def _vel_set_bnd(self):
+        """
+        Apply boundary conditions for velocities.
+        """
+
+        # Top and bottom boundaries
+        for j in range(self.width + 1):
+            if j > 0 and j < self.width:
+                if not self.grid[0][j - 1].is_solid and not self.grid[0][j].is_solid:
+                    self.velocities_x[0][j] = self.velocities_x[1][j]
+
+            if j > 0 and j < self.width:
+                if (
+                    not self.grid[self.height - 1][j - 1].is_solid
+                    and not self.grid[self.height - 1][j].is_solid
+                ):
+                    self.velocities_x[self.height - 1][j] = self.velocities_x[
+                        self.height - 2
+                    ][j]
+
+        for j in range(self.width):
+            if self.grid[0][j].is_solid:
+                self.velocities_y[0][j] = 0.0
+
+            if self.grid[self.height - 1][j].is_solid:
+                self.velocities_y[self.height][j] = 0.0
+
+        # Left and right boundaries
+        for i in range(self.height + 1):
+            if i > 0 and i < self.height:
+                if not self.grid[i - 1][0].is_solid and not self.grid[i][0].is_solid:
+                    self.velocities_y[i][0] = self.velocities_y[i][1]
+
+            if i > 0 and i < self.height:
+                if (
+                    not self.grid[i - 1][self.width - 1].is_solid
+                    and not self.grid[i][self.width - 1].is_solid
+                ):
+                    self.velocities_y[i][self.width - 1] = self.velocities_y[i][
+                        self.width - 2
+                    ]
+
+        for i in range(self.height):
+            if self.grid[0][i].is_solid:
+                self.velocities_x[i][0] = 0.0
+
+            if self.grid[i][self.width - 1].is_solid:
+                self.velocities_x[i][self.width] = 0.0
 
     def _update_velocities(self):
         """Copy next_velocities to current velocities"""
