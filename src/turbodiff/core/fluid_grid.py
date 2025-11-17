@@ -190,25 +190,9 @@ class FluidGrid:
                 [0.0 for _ in range(self.width)] for _ in range(self.height + 1)
             ]
 
-            # Add a circular/vortex flow pattern
-            center_i = self.height // 2
-            center_j = self.width // 2
-
-            for i in range(self.height):
-                for j in range(self.width + 1):
-                    # Horizontal velocities
-                    self.velocities_x[i][j] = 2.0  # constant rightward flow
-
-            # Zero out velocities at solid boundaries
-            for i in range(self.height):
-                for j in range(self.width):
-                    if self.grid[i][j].is_solid:
-                        vels = self.grid[i][j].get_edges_index()
-                        # print(vels)
-                        self.velocities_x[vels[0][0]][vels[0][1]] = 0
-                        self.velocities_x[vels[1][0]][vels[1][1]] = 0
-                        self.velocities_y[vels[2][0]][vels[2][1]] = 0
-                        self.velocities_y[vels[3][0]][vels[3][1]] = 0
+            for i in range(1, self.height - 1):
+                self.velocities_x[i][1] = 2.0  # constant rightward flow
+                self.grid[i][-1].is_solid = False  # ensure right boundary is not solid
 
     def simulate(self, steps: int = -1):
         step = 0
@@ -869,19 +853,19 @@ class FluidGrid:
 
 
 def f(x, y):
-    return ((x - 25) ** 2 + (y - 25) ** 2) ** 1 / 2 - 10
+    return ((x - 10) ** 2 + (y - 25) ** 2) ** 1 / 2 - 10
 
 
 if __name__ == "__main__":
     grid = FluidGrid(
-        height=50,
-        width=50,
+        height=20,
+        width=100,
         cell_size=0.01,
         diffusion=0.001,
         viscosity=0.01,
         dt=0.01,
-        sources=[(10, 15, 300)],
-        # sdf=f,
+        sources=[(10, 10, 300)],
+        sdf=f,
         field_type="wind tunnel",
         visualise=True,
         show_cell_property="density",
