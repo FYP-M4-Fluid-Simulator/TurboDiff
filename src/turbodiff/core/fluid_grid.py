@@ -391,6 +391,39 @@ class FluidGrid:
         self._dens_set_bnd()
         self._update_cells()
 
+    # @jit
+    # def _dens_advect_jax(density: jnp.ndarray,
+    #                 u_vel: jnp.ndarray,
+    #                 v_vel: jnp.ndarray,
+    #                 dt: float,
+    #                 dx: float) -> jnp.ndarray:
+    #     """Fully differentiable density advection."""
+    #     h, w = density.shape
+
+    #     # Vectorized grid coordinates (no loops!)
+    #     i, j = jnp.meshgrid(jnp.arange(h), jnp.arange(w), indexing='ij')
+    #     x = (j + 0.5) * dx
+    #     y = (i + 0.5) * dx
+
+    #     # Sample velocity (vectorized)
+    #     u = bilinear_interp(u_vel, x, y - 0.5 * dx)
+    #     v = bilinear_interp(v_vel, x - 0.5 * dx, y)
+
+    #     # Backward trace (vectorized)
+    #     x_back = x - u * dt
+    #     y_back = y - v * dt
+
+    #     # Clamp (JAX operations, not Python)
+    #     x_back = jnp.clip(x_back, 0.5 * dx, (w - 0.5) * dx)
+    #     y_back = jnp.clip(y_back, 0.5 * dx, (h - 0.5) * dx)
+
+    #     # Interpolate (returns new array, no mutation)
+    #     return bilinear_interp(density, x_back, y_back)
+
+    # # Now we can compute gradients!
+    # grad_fn = grad(lambda d: jnp.sum(_dens_advect_jax(d, u, v, dt, dx)))
+    # gradient = grad_fn(density) # ← This would work now!
+
     def _dens_set_bnd(self):
         """
         Apply boundary conditions for density.
