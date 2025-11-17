@@ -14,8 +14,14 @@ A differentiable fluid simulation pipeline for Wind Turbine Shape Optimization
 
 1. Make a virtual environment for project using `python -m venv /path/to/venv`
 2. Install turbodiff in editable mode using `pip install -e '.[dev]'` from project root directory
-3. Run `pre-commit install`, this will ensure that your code is reformatted according to the Black formatter on commit
-4. Run `pre-commit run --all-files` to run black, Ruff, and prettier before committing
+3. **(Linux with NVIDIA GPU only)** For GPU acceleration, install CUDA-enabled JAX:
+   ```bash
+   pip install --upgrade "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+   ```
+   Or use: `pip install -e '.[dev,cuda]'`
+4. **(Windows)** JAX CPU-only is installed by default. GPU support is experimental.
+5. Run `pre-commit install`, this will ensure that your code is reformatted according to the Black formatter on commit
+6. Run `pre-commit run --all-files` to run black, Ruff, and prettier before committing
 
 # Testing
 

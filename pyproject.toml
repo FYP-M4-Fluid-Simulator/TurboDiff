@@ -17,6 +17,8 @@ requires-python = ">=3.9"
 
 dependencies = [
   "numpy>=1.24",
+  "jax>=0.4.20",
+  "jaxlib>=0.4.20",
   "matplotlib>=3.8",
   "pygame>=2.5",
 ]
@@ -29,6 +31,11 @@ dev = [
   "sphinx",
   "sphinx-rtd-theme",
   "pre-commit"
+]
+
+# GPU support
+cuda = [
+  "jax[cuda12_pip]",
 ]
 
 [tool.setuptools.packages.find]
