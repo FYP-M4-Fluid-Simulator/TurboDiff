@@ -596,6 +596,26 @@ class FluidGrid:
         div += self.velocities_y[vel_edges[3][0]][vel_edges[3][1]]  # down edge - out
         return div / self.cell_size
 
+    def _get_curl(self, i, j):
+        curl = 0.0
+        if j > 0:
+            curl += (
+                self.velocities_y[i][j - 1] + self.velocities_y[i + 1][j - 1]
+            ) / 2  # down on left
+        if j < self.width - 1:
+            curl -= (
+                self.velocities_y[i][j + 1] + self.velocities_y[i + 1][j + 1]
+            ) / 2  # down on right
+        if i > 0:
+            curl -= (
+                self.velocities_x[i - 1][j] + self.velocities_x[i - 1][j + 1]
+            ) / 2  # right on up
+        if i < self.height - 1:
+            curl += (
+                self.velocities_x[i + 1][j] + self.velocities_x[i + 1][j + 1]
+            ) / 2  # right on down
+        return curl / self.cell_size
+
     def _vel_project(self):
         self._pressure = [[0.0 for _ in range(self.width)] for _ in range(self.height)]
 
@@ -690,6 +710,13 @@ class FluidGrid:
                             max(0, min(255, int(200 * pressure))),
                             0,
                             max(0, min(255, int(200 * -pressure))),
+                        )
+                    elif self.show_cell_property == "curl":
+                        curl = self._get_curl(y, x)
+                        color = (
+                            max(0, min(255, int(curl))),
+                            0,
+                            max(0, min(255, int(-curl))),
                         )
                     elif self.show_cell_property == "advection":
                         # Show neutral background to highlight velocity arrows
@@ -951,7 +978,7 @@ if __name__ == "__main__":
         sdf=f,
         field_type="wind tunnel",
         visualise=True,
-        show_cell_property="density",
+        show_cell_property="curl",
         show_velocity=True,
         show_cell_centered_velocity=False,
     )
