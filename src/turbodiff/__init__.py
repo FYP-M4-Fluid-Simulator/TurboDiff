@@ -16,14 +16,10 @@ from .core import initial_conditions
 __version__ = "0.1.0"
 
 __all__ = [
-    # JAX-based classes (recommended)
     "FluidGrid",
     "FluidState",
     "Grid",
     "StaggeredGrid",
     "Array",
     "initial_conditions",
-    # Legacy classes (deprecated)
-    "FluidGridLegacy",
-    "FluidCell",
 ]
