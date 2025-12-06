@@ -192,6 +192,74 @@ class FluidGrid:
             step=state.step,
         )
 
+    def diffuse_density(self, state: FluidState, num_iters: int = 20) -> FluidState:
+        """
+        Perform Gauss–Seidel diffusion on the density field in a JAX-friendly way.
+
+        Args:
+            state: FluidState
+
+        Returns:
+            Updated FluidState with diffused density.
+        """
+
+        dt = self.dt
+        diffusion = self.diffusion
+        cell_size = self.cell_size
+
+        solid = state.solid_mask
+        density = state.density.values
+        a = dt * diffusion / (cell_size * cell_size)
+
+        # Precompute a mask for fluid interior cells
+        interior_mask = (~solid)[1:-1, 1:-1]  # True only where not solid
+
+        def gs_iteration(d):
+            """One Gauss–Seidel-like update using vectorized neighbor sampling."""
+
+            # Shifted neighbor fields (up, down, left, right)
+            up = d[:-2, 1:-1]
+            down = d[2:, 1:-1]
+            left = d[1:-1, :-2]
+            right = d[1:-1, 2:]
+
+            # Neighbor counts (skip solids)
+            n_up = (~solid[:-2, 1:-1]).astype(jnp.float32)
+            n_down = (~solid[2:, 1:-1]).astype(jnp.float32)
+            n_left = (~solid[1:-1, :-2]).astype(jnp.float32)
+            n_right = (~solid[1:-1, 2:]).astype(jnp.float32)
+
+            neighbors = up * n_up + down * n_down + left * n_left + right * n_right
+
+            neighbor_counts = n_up + n_down + n_left + n_right
+
+            center = d[1:-1, 1:-1]
+
+            # Gauss–Seidel update formula
+            new_center = (center + a * neighbors) / (1.0 + a * neighbor_counts)
+
+            # Do not modify solid cells
+            new_center = jnp.where(interior_mask, new_center, center)
+
+            # Write back into full grid
+            return d.at[1:-1, 1:-1].set(new_center)
+
+        # Run repeated iterations
+        new_density = jax.lax.fori_loop(
+            0, num_iters, lambda _, d: gs_iteration(d), density
+        )
+
+        # Produce new state
+        return state.__class__(
+            density=state.density.with_values(new_density),
+            velocity=state.velocity,
+            pressure=state.pressure,
+            solid_mask=state.solid_mask,
+            sources=state.sources,
+            time=state.time,
+            step=state.step,
+        )
+
     def advect_density(self, state: FluidState) -> FluidState:
         """
         Advect density using semi-Lagrangian method.
@@ -378,6 +446,7 @@ class FluidGrid:
         """
         # Density step (advection only)
         state = self.add_sources_to_density(state)
+        state = self.diffuse_density(state)
         state = self.advect_density(state)
 
         # Velocity step (advection only)

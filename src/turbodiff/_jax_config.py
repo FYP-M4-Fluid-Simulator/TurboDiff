@@ -46,41 +46,41 @@ def _detect_platform():
     # Linux
     elif system == "Linux":
         # Check if CUDA is available
-        try:
-            # Temporarily set to check what's available
-            os.environ["JAX_PLATFORMS"] = ""
+        # try:
+        #     # Temporarily set to check what's available
+        #     os.environ["JAX_PLATFORMS"] = ""
 
-            # Import jax to trigger device discovery
-            from jax import devices
+        #     # Import jax to trigger device discovery
+        #     from jax import devices
 
-            # Check for CUDA/GPU devices
-            try:
-                gpu_devices = devices("gpu")
-                if len(gpu_devices) > 0:
-                    return "gpu"
-            except Exception:
-                pass
+        #     # Check for CUDA/GPU devices
+        #     try:
+        #         gpu_devices = devices("gpu")
+        #         if len(gpu_devices) > 0:
+        #             return "gpu"
+        #     except Exception:
+        #         pass
 
-            # Check for TPU devices
-            try:
-                tpu_devices = devices("tpu")
-                if len(tpu_devices) > 0:
-                    return "tpu"
-            except Exception:
-                pass
+        #     # Check for TPU devices
+        #     try:
+        #         tpu_devices = devices("tpu")
+        #         if len(tpu_devices) > 0:
+        #             return "tpu"
+        #     except Exception:
+        #         pass
 
-        except Exception:
-            pass
+        # except Exception:
+        #     pass
 
-        # Fallback: Check nvidia-smi
-        import subprocess
+        # # Fallback: Check nvidia-smi
+        # import subprocess
 
-        try:
-            result = subprocess.run(["nvidia-smi"], capture_output=True, timeout=2)
-            if result.returncode == 0:
-                return "gpu"
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
+        # try:
+        #     result = subprocess.run(["nvidia-smi"], capture_output=True, timeout=2)
+        #     if result.returncode == 0:
+        #         return "gpu"
+        # except (FileNotFoundError, subprocess.TimeoutExpired):
+        #     pass
 
         # Default to CPU
         return "cpu"

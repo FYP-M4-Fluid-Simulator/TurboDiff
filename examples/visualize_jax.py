@@ -33,7 +33,7 @@ def main():
     state = sim.create_initial_state()
 
     # Set spiral velocity field
-    state = sim.set_velocity_field(state, field_type="wind tunnel")
+    state = sim.set_velocity_field(state, field_type="spiral")
 
     # Add density source at (10, 10)
     state = sim.set_sources(state, [(10, 10, 300.0)])
