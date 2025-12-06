@@ -13,14 +13,8 @@ from typing import Callable, Optional
 import math
 import jax
 import jax.numpy as jnp
-
-try:
-    import pygame
-
-    PYGAME_AVAILABLE = True
-except ImportError:
-    PYGAME_AVAILABLE = False
-from turbodiff.core.types import Array
+import pygame
+from jax import Array
 from turbodiff.core.grids import Grid, StaggeredGrid
 from turbodiff.core.utils import (
     create_solid_mask,
@@ -114,10 +108,6 @@ class FluidGrid:
 
         # Initialize pygame if needed
         if self.visualise:
-            if not PYGAME_AVAILABLE:
-                raise ImportError(
-                    "pygame is required for visualization. Install with: pip install pygame"
-                )
             pygame.init()
             pygame.display.set_caption("TurboDiff - JAX Fluid Simulation")
             self.display_size = 1000 // max(self.height, self.width)
@@ -511,6 +501,60 @@ class FluidGrid:
             step=state.step,
         )
 
+    def get_divergence(self, state: FluidState, i: int, j: int) -> float:
+        """
+        Compute divergence at cell (i, j).
+
+        Args:
+            state: Current simulation state
+            i: Row index
+            j: Column index
+
+        Returns:
+            Divergence value
+        """
+        import numpy as np
+
+        u = np.asarray(state.velocity.u)
+        v = np.asarray(state.velocity.v)
+
+        div = 0.0
+        div -= u[i, j]  # left edge - in
+        div += u[i, j + 1]  # right edge - out
+        div -= v[i, j]  # top edge - in
+        div += v[i + 1, j]  # bottom edge - out
+
+        return float(div / self.cell_size)
+
+    def get_curl(self, state: FluidState, i: int, j: int) -> float:
+        """
+        Compute curl at cell (i, j).
+
+        Args:
+            state: Current simulation state
+            i: Row index
+            j: Column index
+
+        Returns:
+            Curl value
+        """
+        import numpy as np
+
+        u = np.asarray(state.velocity.u)
+        v = np.asarray(state.velocity.v)
+
+        curl = 0.0
+        if j > 0:
+            curl += (v[i, j - 1] + v[i + 1, j - 1]) / 2  # down on left
+        if j < self.width - 1:
+            curl -= (v[i, j + 1] + v[i + 1, j + 1]) / 2  # down on right
+        if i > 0:
+            curl -= (u[i - 1, j] + u[i - 1, j + 1]) / 2  # right on up
+        if i < self.height - 1:
+            curl += (u[i + 1, j] + u[i + 1, j + 1]) / 2  # right on down
+
+        return float(curl / self.cell_size)
+
     def add_velocity_from_mouse(
         self,
         state: FluidState,
@@ -594,17 +638,26 @@ class FluidGrid:
         Args:
             state: Current simulation state
         """
-        if not self.visualise or not PYGAME_AVAILABLE:
+        if not self.visualise:
             return
 
         self.screen.fill((0, 0, 0))
 
-        # Draw density field
-        density_array = jnp.array(state.density.values)
+        # Convert to numpy arrays once for fast access
+        import numpy as np
 
+        density_array = np.asarray(state.density.values)
+        solid_mask_array = np.asarray(state.solid_mask)
+        pressure_array = (
+            np.asarray(state.pressure.values)
+            if hasattr(state.pressure, "values")
+            else None
+        )
+
+        # Draw cells with appropriate coloring
         for i in range(self.height):
             for j in range(self.width):
-                if state.solid_mask[i, j]:
+                if solid_mask_array[i, j]:
                     color = (0, 0, 0)
                 else:
                     if self.show_cell_property == "density":
@@ -618,6 +671,35 @@ class FluidGrid:
                             ),
                         )
                         color = (val, val, val)
+                    elif self.show_cell_property == "divergence":
+                        div = self.get_divergence(state, i, j)
+                        color = (
+                            max(0, min(255, int(div))),
+                            0,
+                            max(0, min(255, int(-div))),
+                        )
+                    elif self.show_cell_property == "pressure":
+                        if pressure_array is not None:
+                            pressure = pressure_array[i, j]
+                            color = (
+                                max(0, min(255, int(200 * pressure))),
+                                0,
+                                max(0, min(255, int(200 * -pressure))),
+                            )
+                        else:
+                            GRAY_VALUE = 30
+                            color = (GRAY_VALUE, GRAY_VALUE, GRAY_VALUE)
+                    elif self.show_cell_property == "curl":
+                        curl = self.get_curl(state, i, j)
+                        color = (
+                            max(0, min(255, int(curl))),
+                            0,
+                            max(0, min(255, int(-curl))),
+                        )
+                    elif self.show_cell_property == "advection":
+                        # Show neutral background to highlight velocity arrows
+                        GRAY_VALUE = 30
+                        color = (GRAY_VALUE, GRAY_VALUE, GRAY_VALUE)
                     else:
                         GRAY_VALUE = 30
                         color = (GRAY_VALUE, GRAY_VALUE, GRAY_VALUE)
@@ -631,63 +713,63 @@ class FluidGrid:
                 pygame.draw.rect(self.screen, color, rect)
 
         # Draw velocity arrows if requested
-        if self.show_velocity and self.show_cell_centered_velocity:
-            u_array = jnp.array(state.velocity.u)
-            v_array = jnp.array(state.velocity.v)
+        if self.show_velocity:
+            import numpy as np
 
-            for i in range(self.height):
-                for j in range(self.width):
-                    # Sample velocity at cell center
-                    x = j + 0.5
-                    y = i + 0.5
-                    u = float(
-                        bilinear_interpolate(
-                            u_array,
-                            jnp.array(x),
-                            jnp.array(y - 0.5),
-                            self.width + 1,
-                            self.height,
-                        )
-                    )
-                    v = float(
-                        bilinear_interpolate(
-                            v_array,
-                            jnp.array(x - 0.5),
-                            jnp.array(y),
-                            self.width,
-                            self.height + 1,
-                        )
-                    )
+            u_array = np.asarray(state.velocity.u)
+            v_array = np.asarray(state.velocity.v)
 
-                    # Calculate magnitude and direction
-                    mag = (u**2 + v**2) ** 0.5
-                    if mag > 0:
-                        mag_dir_x = u / mag
-                        mag_dir_y = v / mag
-                    else:
-                        mag_dir_x = 0
-                        mag_dir_y = 0
-                    mag = min(1.0, mag)
+            if self.show_cell_centered_velocity:
+                # Cell Centered Velocity
+                # Vectorized velocity computation at cell centers
+                u_at_centers = (u_array[:, :-1] + u_array[:, 1:]) / 2.0
+                v_at_centers = (v_array[:-1, :] + v_array[1:, :]) / 2.0
 
-                    # Color based on magnitude
-                    r = int(255 * mag)
-                    b = int(255 * (1 - mag))
-                    color = (r, 0, b)
+                # Compute magnitudes
+                mags = np.sqrt(u_at_centers**2 + v_at_centers**2)
+                mags_clamped = np.minimum(mags, 1.0)
 
-                    # Draw arrow
-                    scale = self.display_size * 0.4
-                    start_x = (j + 0.5) * self.display_size
-                    start_y = (i + 0.5) * self.display_size
-                    end_x = start_x + scale * mag_dir_x
-                    end_y = start_y + scale * mag_dir_y
+                # Normalized directions (avoid division by zero)
+                mag_nonzero = mags > 1e-6
+                # Use np.divide with where parameter to safely handle division
+                mag_dir_x = np.divide(
+                    u_at_centers,
+                    mags,
+                    out=np.zeros_like(u_at_centers),
+                    where=mag_nonzero,
+                )
+                mag_dir_y = np.divide(
+                    v_at_centers,
+                    mags,
+                    out=np.zeros_like(v_at_centers),
+                    where=mag_nonzero,
+                )
 
-                    if mag > 0.01:  # Only draw if significant
+                for i in range(self.height):
+                    for j in range(self.width):
+                        mag = float(mags_clamped[i, j])
+                        mag_dir_x_val = float(mag_dir_x[i, j])
+                        mag_dir_y_val = float(mag_dir_y[i, j])
+
+                        # Color based on magnitude
+                        r = int(255 * mag)
+                        g = 0
+                        b = int(255 * (1 - mag))
+                        color = (r, g, b)
+
+                        # Draw arrow
+                        scale = self.display_size * 0.4
+                        start_x = (j + 0.5) * self.display_size
+                        start_y = (i + 0.5) * self.display_size
+                        end_x = start_x + scale * mag_dir_x_val
+                        end_y = start_y + scale * mag_dir_y_val
+
                         pygame.draw.aaline(
                             self.screen, color, (start_x, start_y), (end_x, end_y), 2
                         )
 
                         # Draw arrowhead
-                        angle = math.atan2(mag_dir_y, mag_dir_x)
+                        angle = math.atan2(mag_dir_y_val, mag_dir_x_val)
                         tip_len = scale * mag / 2
                         spread = math.radians(25)
 
@@ -702,6 +784,117 @@ class FluidGrid:
                             True,
                             [(end_x, end_y), (left_x, left_y), (right_x, right_y)],
                         )
+
+            else:
+                # Face-centered velocity arrows
+                # Horizontal Velocity (u-velocities at vertical faces)
+                for i in range(self.height):
+                    for j in range(self.width + 1):
+                        mag_dir = float(u_array[i, j])
+                        mag_dir = (
+                            min(1.0, mag_dir) if mag_dir > 0 else max(-1.0, mag_dir)
+                        )
+
+                        # Color based on magnitude
+                        r = int(255 * abs(mag_dir))
+                        g = 0
+                        b = int(255 * (1 - abs(mag_dir)))
+                        color = (r, g, b)
+
+                        scale = self.display_size * 0.4
+                        start_x = j * self.display_size
+                        end_x = start_x + scale * mag_dir
+                        y = (i + 0.5) * self.display_size
+
+                        pygame.draw.aaline(
+                            self.screen, color, (start_x, y), (end_x, y), 2
+                        )
+
+                        # Draw arrowhead
+                        angle = 0 if mag_dir > 0 else math.pi
+                        tip_len = scale * abs(mag_dir) / 2
+                        spread = math.radians(25)
+
+                        left_x = end_x - tip_len * math.cos(angle - spread)
+                        left_y = y - tip_len * math.sin(angle - spread)
+                        right_x = end_x - tip_len * math.cos(angle + spread)
+                        right_y = y - tip_len * math.sin(angle + spread)
+
+                        pygame.draw.aalines(
+                            self.screen,
+                            color,
+                            True,
+                            [(end_x, y), (left_x, left_y), (right_x, right_y)],
+                        )
+
+                # Vertical Velocity (v-velocities at horizontal faces)
+                for i in range(self.height + 1):
+                    for j in range(self.width):
+                        mag_dir = float(v_array[i, j])
+                        mag_dir = (
+                            min(1.0, mag_dir) if mag_dir > 0 else max(-1.0, mag_dir)
+                        )
+
+                        # Color based on magnitude
+                        r = int(255 * abs(mag_dir))
+                        g = 0
+                        b = int(255 * (1 - abs(mag_dir)))
+                        color = (r, g, b)
+
+                        scale = self.display_size * 0.4
+                        x = (j + 0.5) * self.display_size
+                        start_y = i * self.display_size
+                        end_y = start_y + scale * mag_dir
+
+                        pygame.draw.aaline(
+                            self.screen, color, (x, start_y), (x, end_y), 2
+                        )
+
+                        # Draw arrowhead
+                        angle = math.pi / 2 if mag_dir > 0 else -math.pi / 2
+                        tip_len = scale * abs(mag_dir) / 2
+                        spread = math.radians(25)
+
+                        left_x = x - tip_len * math.cos(angle - spread)
+                        left_y = end_y - tip_len * math.sin(angle - spread)
+                        right_x = x - tip_len * math.cos(angle + spread)
+                        right_y = end_y - tip_len * math.sin(angle + spread)
+
+                        pygame.draw.aalines(
+                            self.screen,
+                            color,
+                            True,
+                            [(x, end_y), (left_x, left_y), (right_x, right_y)],
+                        )
+
+        # Cursor indicator when in painting mode
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_a]:
+            mouse_x, mouse_y = pygame.mouse.get_pos()
+            # Circle to show brush area
+            brush_radius_pixels = self.display_size * 1.5
+            pygame.draw.circle(
+                self.screen,
+                (0, 255, 0),
+                (mouse_x, mouse_y),
+                int(brush_radius_pixels),
+                2,
+            )
+            # Crosshair
+            pygame.draw.line(
+                self.screen,
+                (0, 255, 0),
+                (mouse_x - 10, mouse_y),
+                (mouse_x + 10, mouse_y),
+                2,
+            )
+            pygame.draw.line(
+                self.screen,
+                (0, 255, 0),
+                (mouse_x, mouse_y - 10),
+                (mouse_x, mouse_y + 10),
+                2,
+            )
 
         pygame.display.flip()
 
@@ -749,7 +942,7 @@ class FluidGrid:
 
             if self.visualise:
                 self.draw_state(state)
-                self.clock.tick(60)
+                self.clock.tick(30)
 
             step += 1
 

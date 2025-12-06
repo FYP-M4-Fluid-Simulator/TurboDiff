@@ -5,11 +5,11 @@ All operations use JAX arrays for automatic differentiation
 and GPU acceleration.
 """
 
-from typing import Tuple, Union
+from typing import Tuple, Union, TypeAlias
 import jax.numpy as jnp
 
 # JAX array type
-Array = jnp.ndarray
+Array: TypeAlias = jnp.ndarray
 
 # Common type aliases
 Shape = Tuple[int, ...]
