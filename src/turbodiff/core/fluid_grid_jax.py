@@ -426,17 +426,164 @@ class FluidGrid:
             step=state.step,
         )
 
+    def compute_divergence(self, state: FluidState) -> Array:
+        """
+        Compute divergence of velocity field at cell centers.
+
+        Args:
+            state: Current simulation state
+
+        Returns:
+            Divergence field, shape (height, width)
+        """
+        u = state.velocity.u
+        v = state.velocity.v
+
+        div = (u[:, 1:] - u[:, :-1]) / self.cell_size + (
+            v[1:, :] - v[:-1, :]
+        ) / self.cell_size
+
+        return div
+
+    def solve_pressure(self, state: FluidState, num_iters: int = 30) -> FluidState:
+        """
+        Solve for pressure using Gauss-Seidel iterations.
+
+        Args:
+            state: Current simulation state
+            num_iters: Number of Gauss-Seidel iterations
+
+        Returns:
+            New state with updated pressure field
+        """
+        divergence = self.compute_divergence(state)
+        solid = state.solid_mask
+        pressure = jnp.zeros((self.height, self.width))
+        scale = self.cell_size * self.cell_size / self.dt
+
+        def gs_iteration(p):
+            neighbor_sum = jnp.zeros_like(p)
+            neighbor_count = jnp.zeros_like(p)
+
+            # Left neighbor
+            left_contrib = jnp.zeros_like(p)
+            left_count = jnp.zeros_like(p)
+            left_contrib = left_contrib.at[:, 1:].set(p[:, :-1])
+            left_count = left_count.at[:, 1:].set((~solid[:, :-1]).astype(jnp.float32))
+            neighbor_sum += left_contrib * left_count
+            neighbor_count += left_count
+
+            # Right neighbor
+            right_contrib = jnp.zeros_like(p)
+            right_count = jnp.zeros_like(p)
+            right_contrib = right_contrib.at[:, :-1].set(p[:, 1:])
+            right_count = right_count.at[:, :-1].set(
+                (~solid[:, 1:]).astype(jnp.float32)
+            )
+            neighbor_sum += right_contrib * right_count
+            neighbor_count += right_count
+
+            # Up neighbor
+            up_contrib = jnp.zeros_like(p)
+            up_count = jnp.zeros_like(p)
+            up_contrib = up_contrib.at[1:, :].set(p[:-1, :])
+            up_count = up_count.at[1:, :].set((~solid[:-1, :]).astype(jnp.float32))
+            neighbor_sum += up_contrib * up_count
+            neighbor_count += up_count
+
+            # Down neighbor
+            down_contrib = jnp.zeros_like(p)
+            down_count = jnp.zeros_like(p)
+            down_contrib = down_contrib.at[:-1, :].set(p[1:, :])
+            down_count = down_count.at[:-1, :].set((~solid[1:, :]).astype(jnp.float32))
+            neighbor_sum += down_contrib * down_count
+            neighbor_count += down_count
+
+            div_contrib = divergence * scale
+            new_p = jnp.where(
+                neighbor_count > 0, (neighbor_sum - div_contrib) / neighbor_count, 0.0
+            )
+            new_p = jnp.where(solid, 0.0, new_p)
+
+            return new_p
+
+        pressure = jax.lax.fori_loop(
+            0, num_iters, lambda _, p: gs_iteration(p), pressure
+        )
+
+        return state.__class__(
+            density=state.density,
+            velocity=state.velocity,
+            pressure=state.pressure.with_values(pressure),
+            solid_mask=state.solid_mask,
+            sources=state.sources,
+            time=state.time,
+            step=state.step,
+        )
+
+    def project_velocity(self, state: FluidState) -> FluidState:
+        """
+        Make velocity field divergence-free by subtracting pressure gradient.
+
+        Args:
+            state: Current simulation state (with solved pressure)
+
+        Returns:
+            New state with projected velocity
+        """
+        pressure = state.pressure.values
+        u = state.velocity.u
+        v = state.velocity.v
+        solid = state.solid_mask
+
+        # Horizontal velocities
+        p_left = pressure[:, :-1]
+        p_right = pressure[:, 1:]
+        grad_u = -(p_right - p_left) * self.dt / self.cell_size
+
+        solid_left = solid[:, :-1]
+        solid_right = solid[:, 1:]
+        solid_mask_u = jnp.logical_or(solid_left, solid_right)
+        grad_u_masked = jnp.where(solid_mask_u, 0.0, grad_u)
+
+        new_u = u.at[:, 1:-1].add(grad_u_masked)
+
+        # Vertical velocities
+        p_up = pressure[:-1, :]
+        p_down = pressure[1:, :]
+        grad_v = -(p_down - p_up) * self.dt / self.cell_size
+
+        solid_up = solid[:-1, :]
+        solid_down = solid[1:, :]
+        solid_mask_v = jnp.logical_or(solid_up, solid_down)
+        grad_v_masked = jnp.where(solid_mask_v, 0.0, grad_v)
+
+        new_v = v.at[1:-1, :].add(grad_v_masked)
+
+        new_u, new_v = apply_zero_velocity_at_solids(new_u, new_v, solid)
+
+        return state.__class__(
+            density=state.density,
+            velocity=state.velocity.with_values(new_u, new_v),
+            pressure=state.pressure,
+            solid_mask=state.solid_mask,
+            sources=state.sources,
+            time=state.time,
+            step=state.step,
+        )
+
     def step(self, state: FluidState) -> FluidState:
         """
         Advance simulation by one time step.
 
-        TESTING: Only advection enabled (no diffusion, no projection)
-
         Performs:
         1. Add density sources
-        2. Advect density
-        3. Advect velocity
-        4. Inject wind tunnel velocity (if active)
+        2. Diffuse density
+        3. Advect density
+        4. Advect velocity
+        5. Inject wind tunnel velocity (if active)
+        6. Solve pressure
+        7. Project velocity (enforce incompressibility)
 
         Args:
             state: Current simulation state
@@ -444,16 +591,20 @@ class FluidGrid:
         Returns:
             New state after one time step
         """
-        # Density step (advection only)
+        # Density step
         state = self.add_sources_to_density(state)
         state = self.diffuse_density(state)
         state = self.advect_density(state)
 
-        # Velocity step (advection only)
+        # Velocity step
         state = self.advect_velocity(state)
 
         # Inject wind tunnel velocity if in wind tunnel mode
         state = self.inject_wind_tunnel_velocity(state)
+
+        # Pressure projection (enforce incompressibility)
+        state = self.solve_pressure(state, num_iters=30)
+        state = self.project_velocity(state)
 
         # Update time and step
         new_state = state.__class__(
