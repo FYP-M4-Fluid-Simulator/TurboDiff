@@ -12,6 +12,8 @@ from .core.fluid_grid_jax import FluidGrid, FluidState
 from .core.grids import Grid, StaggeredGrid
 from .core.types import Array
 from .core import initial_conditions
+from .core import geometry
+from .core import optimization
 
 __version__ = "0.1.0"
 
@@ -22,4 +24,6 @@ __all__ = [
     "StaggeredGrid",
     "Array",
     "initial_conditions",
+    "geometry",
+    "optimization",
 ]

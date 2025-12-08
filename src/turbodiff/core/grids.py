@@ -8,6 +8,7 @@ This module provides immutable, differentiable grid representations:
 
 from dataclasses import dataclass
 from typing import Tuple
+import jax
 import jax.numpy as jnp
 from turbodiff.core.types import Array
 
@@ -157,6 +158,42 @@ class StaggeredGrid:
         _, v_values = fn(j_v, i_v)
 
         return StaggeredGrid(u_values, v_values, resolution, cell_size)
+
+
+# ============================================================================
+# JAX PyTree Registration
+# ============================================================================
+# Register Grid and StaggeredGrid as JAX pytrees to enable automatic
+# differentiation through grid operations.
+
+
+def _grid_flatten(grid):
+    """Flatten Grid for JAX transformation."""
+    return (grid.values,), (grid.resolution, grid.cell_size)
+
+
+def _grid_unflatten(metadata, values):
+    """Reconstruct Grid from flattened representation."""
+    resolution, cell_size = metadata
+    return Grid(values[0], resolution, cell_size)
+
+
+def _staggered_grid_flatten(grid):
+    """Flatten StaggeredGrid for JAX transformation."""
+    return (grid.u, grid.v), (grid.resolution, grid.cell_size)
+
+
+def _staggered_grid_unflatten(metadata, values):
+    """Reconstruct StaggeredGrid from flattened representation."""
+    resolution, cell_size = metadata
+    return StaggeredGrid(values[0], values[1], resolution, cell_size)
+
+
+jax.tree_util.register_pytree_node(Grid, _grid_flatten, _grid_unflatten)
+
+jax.tree_util.register_pytree_node(
+    StaggeredGrid, _staggered_grid_flatten, _staggered_grid_unflatten
+)
 
 
 __all__ = [

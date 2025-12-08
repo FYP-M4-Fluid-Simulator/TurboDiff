@@ -399,22 +399,30 @@ class FluidGrid:
 
     def inject_wind_tunnel_velocity(self, state: FluidState) -> FluidState:
         """
-        Continuously inject velocity throughout domain for wind tunnel mode.
-        This maintains a constant rightward flow.
+        Inject velocity at the left inlet boundary for wind tunnel mode.
+        This creates inflow conditions without forcing uniform flow everywhere.
 
         Args:
             state: Current simulation state
 
         Returns:
-            New state with wind tunnel velocity injected
+            New state with wind tunnel velocity injected at inlet
         """
         if not self.is_wind_tunnel:
             return state
 
-        # Maintain uniform rightward velocity throughout domain
-        u = jnp.ones_like(state.velocity.u) * 2.0
-        # Keep v as is (or set to zero for pure horizontal flow)
+        # Only set velocity at the LEFT BOUNDARY (inlet), not everywhere
+        # This allows the flow to develop naturally and create pressure gradients
+        u = state.velocity.u
         v = state.velocity.v
+
+        # Set inlet velocity at left boundary (first few columns)
+        inlet_velocity = 2.0
+        # For staggered grid: u has shape (height, width+1)
+        # Set u at the leftmost vertical faces (column 0 and 1)
+        u = u.at[:, 0:2].set(inlet_velocity)
+
+        # Keep v unchanged (horizontal flow, so v should remain small)
 
         return state.__class__(
             density=state.density,
@@ -587,6 +595,9 @@ class FluidGrid:
 
         Args:
             state: Current simulation state
+                   NOTE: state.solid_mask is used for differentiability.
+                   For shape optimization, update state.solid_mask before
+                   calling step() to enable gradient flow through shape params.
 
         Returns:
             New state after one time step
@@ -1170,6 +1181,47 @@ class FluidGrid:
             pygame.quit()
 
         return state
+
+
+# ============================================================================
+# JAX PyTree Registration
+# ============================================================================
+# Register FluidState as a JAX pytree to enable automatic differentiation
+# through fluid simulation steps.
+
+
+def _fluid_state_flatten(state):
+    """Flatten FluidState for JAX transformation."""
+    children = (
+        state.density,
+        state.velocity,
+        state.pressure,
+        state.solid_mask,
+        state.sources,
+        state.time,
+        state.step,
+    )
+    metadata = None
+    return children, metadata
+
+
+def _fluid_state_unflatten(metadata, children):
+    """Reconstruct FluidState from flattened representation."""
+    density, velocity, pressure, solid_mask, sources, time, step = children
+    return FluidState(
+        density=density,
+        velocity=velocity,
+        pressure=pressure,
+        solid_mask=solid_mask,
+        sources=sources,
+        time=time,
+        step=step,
+    )
+
+
+jax.tree_util.register_pytree_node(
+    FluidState, _fluid_state_flatten, _fluid_state_unflatten
+)
 
 
 __all__ = [
