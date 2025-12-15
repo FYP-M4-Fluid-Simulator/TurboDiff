@@ -1,11 +1,13 @@
 import math
 import random
 import pygame
+import numpy as np
+from scipy.spatial import cKDTree
+from matplotlib.path import Path
 
-# import numpy as np
 from turbodiff.core.fluid_cell import FluidCell
 from typing import Callable
-
+from turbodiff.utils.sdf_generator import prepare_geometry, compute_sdf_at_point
 
 class FluidGrid:
     """
@@ -39,13 +41,20 @@ class FluidGrid:
         sources: list[
             tuple[int, int, float]
         ],  # list of x,y positions for sources of dye
-        sdf: Callable[[int, int], float] | None = None,
         field_type: str = "zero",
         visualise: bool = False,
         show_cell_property: str = "density",
         show_velocity: bool = False,
         show_cell_centered_velocity: bool = False,
+        grid_sdf: np.ndarray | None = None,
+        path: Path | None = None,
+        kdtree: cKDTree | None = None,
     ):
+        
+        self.grid_sdf = grid_sdf
+        self.path = path
+        self.kdtree = kdtree
+
         self.height = height
         self.width = width
         self.cell_size = cell_size
@@ -66,7 +75,8 @@ class FluidGrid:
                     (i, j),
                     0,
                     (i == 0 or i == height - 1 or j == 0 or j == width - 1)
-                    or (sdf is not None and sdf(i, j) < 0),
+                    or (self.path is not None and self.kdtree is not None and 
+                        compute_sdf_at_point(j, i, self.path, self.kdtree) < 0),
                 )
                 for j in range(width)
             ]
@@ -75,7 +85,6 @@ class FluidGrid:
 
         # Set velocity field
         self.set_velocity_field(field_type)
-
         for x, y, s in sources:
             self.grid[x][y].set_source(s)
 
@@ -684,7 +693,7 @@ class FluidGrid:
             for x, cell in enumerate(row):
                 # Draw cell color (density)
                 if cell.is_solid:
-                    color = (0, 0, 0)
+                    color = (255, 255, 255)  # White color for solid cells (airfoil and boundaries)
                 else:
                     if self.show_cell_property == "density":
                         GRAY_VALUE = 30
@@ -963,24 +972,47 @@ class FluidGrid:
 
 
 def f(x, y):
-    return ((x - 10) ** 2 + (y - 25) ** 2) ** 1 / 2 - 10
+    '''this function defines a circle obstacle centered at (10,25) with radius 10
+    '''
+    value =  ((x - 10) ** 2 + (y - 35) ** 2) ** 1 / 2 - 10
+    return value
+
+# print("check value of f:", f(20, 100))
+
+# sdf_function_main
+
+
 
 
 if __name__ == "__main__":
+
+    H, W = 200, 400  # Height, Width - larger grid for better visualization
+
+    grid_sdf, path, kdtree = prepare_geometry(
+        grid_height=H,
+        grid_width=W,
+        dat_filepath="Airfoils\\RAE2822.dat",
+        chord_length=120,
+        offset_x=50,
+        offset_y=100  # Center the airfoil vertically
+    )
+
     grid = FluidGrid(
-        height=20,
-        width=100,
+        height=H,
+        width=W,
         cell_size=0.01,
         diffusion=0.001,
         viscosity=0.01,
         dt=0.01,
-        sources=[(10, 10, 300)],
-        sdf=f,
+        sources=[(10, 50, 100), (10, 100, 100), (10, 150, 100)],  # Multiple dye sources on left
         field_type="wind tunnel",
         visualise=True,
-        show_cell_property="curl",
+        show_cell_property="density",
         show_velocity=True,
         show_cell_centered_velocity=False,
+        grid_sdf=grid_sdf,
+        path=path,
+        kdtree=kdtree
     )
 
     grid.simulate()
