@@ -65,7 +65,7 @@ class FluidGrid:
         dt: Time step in seconds
         diffusion: Diffusion coefficient
         viscosity: Viscosity coefficient (not yet implemented)
-        boundary_solid: If True, boundary cells are solid
+        boundary_type: 0 -> No Boundary, 1 -> Complete Boundary, 2 -> No right boundary
         sdf: Optional signed distance function for obstacles
     """
 
@@ -77,7 +77,7 @@ class FluidGrid:
         dt: float,
         diffusion: float = 0.001,
         viscosity: float = 0.0,
-        boundary_solid: bool = True,
+        boundary_type: int = 1,
         sdf: Optional[Callable[[Array, Array], Array]] = None,
         visualise: bool = False,
         show_cell_property: str = "density",
@@ -103,7 +103,7 @@ class FluidGrid:
 
         # Create solid mask
         self.solid_mask = create_solid_mask(
-            self.resolution, boundary=boundary_solid, sdf_fn=sdf
+            self.resolution, boundary=boundary_type, sdf_fn=sdf
         )
 
         # Initialize pygame if needed
@@ -208,6 +208,7 @@ class FluidGrid:
         cell_size = self.cell_size
 
         solid = state.solid_mask
+        density0 = state.density.values
         density = state.density.values
         a = dt * diffusion / (cell_size * cell_size)
 
@@ -233,7 +234,7 @@ class FluidGrid:
 
             neighbor_counts = n_up + n_down + n_left + n_right
 
-            center = d[1:-1, 1:-1]
+            center = density0[1:-1, 1:-1]
 
             # Gauss–Seidel update formula
             new_center = (center + a * neighbors) / (1.0 + a * neighbor_counts)

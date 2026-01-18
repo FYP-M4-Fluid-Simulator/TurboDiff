@@ -99,14 +99,14 @@ def sample_staggered_velocity_at(
 
 
 def create_solid_mask(
-    resolution: tuple[int, int], boundary: bool = True, sdf_fn=None
+    resolution: tuple[int, int], boundary: int = 1, sdf_fn=None
 ) -> Array:
     """
     Create solid cell mask for the grid.
 
     Args:
         resolution: (height, width) of the grid
-        boundary: If True, mark boundary cells as solid
+        boundary: 0 -> No Boundary, 1 -> Complete Boundary, 2 -> No right boundary
         sdf_fn: Optional signed distance function sdf(i, j) < 0 means solid
 
     Returns:
@@ -122,6 +122,7 @@ def create_solid_mask(
         solid_mask = solid_mask.at[0, :].set(True)
         solid_mask = solid_mask.at[-1, :].set(True)
         solid_mask = solid_mask.at[:, 0].set(True)
+    if boundary == 2:
         solid_mask = solid_mask.at[:, -1].set(True)
 
     if sdf_fn is not None:
