@@ -22,6 +22,21 @@ from turbodiff.core.utils import (
     bilinear_interpolate,
 )
 
+import time
+from functools import wraps
+
+
+def timeit(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        result = func(*args, **kwargs)
+        end = time.perf_counter()
+        print(f"{func.__name__} took {end - start:.6f} seconds")
+        return result
+
+    return wrapper
+
 
 @dataclass(frozen=True)
 class FluidState:
@@ -171,6 +186,7 @@ class FluidGrid:
             step=0,
         )
 
+    @jax.jit
     def add_sources_to_density(self, state: FluidState) -> FluidState:
         """
         Add density sources.
@@ -192,6 +208,7 @@ class FluidGrid:
             step=state.step,
         )
 
+    @jax.jit
     def diffuse_density(self, state: FluidState, num_iters: int = 20) -> FluidState:
         """
         Perform Gauss–Seidel diffusion on the density field in a JAX-friendly way.
@@ -215,8 +232,11 @@ class FluidGrid:
         # Precompute a mask for fluid interior cells
         interior_mask = (~solid)[1:-1, 1:-1]  # True only where not solid
 
-        def gs_iteration(d):
+        @jax.jit
+        def gs_iteration(d_tuple):
             """One Gauss–Seidel-like update using vectorized neighbor sampling."""
+
+            d, d0 = d_tuple
 
             # Shifted neighbor fields (up, down, left, right)
             up = d[:-2, 1:-1]
@@ -243,11 +263,11 @@ class FluidGrid:
             new_center = jnp.where(interior_mask, new_center, center)
 
             # Write back into full grid
-            return d.at[1:-1, 1:-1].set(new_center)
+            return (d.at[1:-1, 1:-1].set(new_center), d0)
 
         # Run repeated iterations
-        new_density = jax.lax.fori_loop(
-            0, num_iters, lambda _, d: gs_iteration(d), density
+        new_density, _ = jax.lax.fori_loop(
+            0, num_iters, lambda _, d: gs_iteration(d), (density, density0)
         )
 
         # Produce new state
@@ -261,6 +281,7 @@ class FluidGrid:
             step=state.step,
         )
 
+    @jax.jit
     def advect_density(self, state: FluidState) -> FluidState:
         """
         Advect density using semi-Lagrangian method.
@@ -324,6 +345,7 @@ class FluidGrid:
             step=state.step,
         )
 
+    @jax.jit
     def advect_velocity(self, state: FluidState) -> FluidState:
         """
         Advect velocity field (self-advection).
@@ -398,6 +420,7 @@ class FluidGrid:
             step=state.step,
         )
 
+    @jax.jit
     def inject_wind_tunnel_velocity(self, state: FluidState) -> FluidState:
         """
         Inject velocity at the left inlet boundary for wind tunnel mode.
@@ -435,6 +458,7 @@ class FluidGrid:
             step=state.step,
         )
 
+    @jax.jit
     def compute_divergence(self, state: FluidState) -> Array:
         """
         Compute divergence of velocity field at cell centers.
@@ -454,6 +478,7 @@ class FluidGrid:
 
         return div
 
+    @jax.jit
     def solve_pressure(self, state: FluidState, num_iters: int = 30) -> FluidState:
         """
         Solve for pressure using Gauss-Seidel iterations.
@@ -470,7 +495,10 @@ class FluidGrid:
         pressure = jnp.zeros((self.height, self.width))
         scale = self.cell_size * self.cell_size / self.dt
 
-        def gs_iteration(p):
+        @jax.jit
+        def gs_iteration(p_div):
+            p, div = p_div
+
             neighbor_sum = jnp.zeros_like(p)
             neighbor_count = jnp.zeros_like(p)
 
@@ -508,16 +536,16 @@ class FluidGrid:
             neighbor_sum += down_contrib * down_count
             neighbor_count += down_count
 
-            div_contrib = divergence * scale
+            div_contrib = div * scale
             new_p = jnp.where(
                 neighbor_count > 0, (neighbor_sum - div_contrib) / neighbor_count, 0.0
             )
             new_p = jnp.where(solid, 0.0, new_p)
 
-            return new_p
+            return (new_p, div)
 
-        pressure = jax.lax.fori_loop(
-            0, num_iters, lambda _, p: gs_iteration(p), pressure
+        pressure, _ = jax.lax.fori_loop(
+            0, num_iters, lambda _, p: gs_iteration(p), (pressure, divergence)
         )
 
         return state.__class__(
@@ -530,6 +558,7 @@ class FluidGrid:
             step=state.step,
         )
 
+    @jax.jit
     def project_velocity(self, state: FluidState) -> FluidState:
         """
         Make velocity field divergence-free by subtracting pressure gradient.
@@ -581,6 +610,8 @@ class FluidGrid:
             step=state.step,
         )
 
+    @timeit
+    @jax.jit
     def step(self, state: FluidState) -> FluidState:
         """
         Advance simulation by one time step.
@@ -1222,6 +1253,62 @@ def _fluid_state_unflatten(metadata, children):
 
 jax.tree_util.register_pytree_node(
     FluidState, _fluid_state_flatten, _fluid_state_unflatten
+)
+
+
+def _fluid_grid_flatten(grid):
+    """Flatten FluidGrid for JAX transformation.
+
+    Treats the solid_mask as dynamic data that can be differentiated,
+    while storing all other configuration as static metadata.
+    """
+    children = (grid.solid_mask,)
+    metadata = {
+        "height": grid.height,
+        "width": grid.width,
+        "cell_size": grid.cell_size,
+        "dt": grid.dt,
+        "diffusion": grid.diffusion,
+        "viscosity": grid.viscosity,
+        "visualise": grid.visualise,
+        "show_cell_property": grid.show_cell_property,
+        "show_velocity": grid.show_velocity,
+        "show_cell_centered_velocity": grid.show_cell_centered_velocity,
+        "is_wind_tunnel": grid.is_wind_tunnel,
+    }
+    return children, metadata
+
+
+def _fluid_grid_unflatten(metadata, children):
+    """Reconstruct FluidGrid from flattened representation."""
+    (solid_mask,) = children
+
+    # Create a new FluidGrid with the stored configuration
+    # We need to create it without SDF since we already have the solid_mask
+    grid = FluidGrid(
+        height=metadata["height"],
+        width=metadata["width"],
+        cell_size=metadata["cell_size"],
+        dt=metadata["dt"],
+        diffusion=metadata["diffusion"],
+        viscosity=metadata["viscosity"],
+        boundary_type=0,  # Use no boundary since we have the mask
+        sdf=None,
+        visualise=metadata["visualise"],
+        show_cell_property=metadata["show_cell_property"],
+        show_velocity=metadata["show_velocity"],
+        show_cell_centered_velocity=metadata["show_cell_centered_velocity"],
+    )
+
+    # Replace the solid_mask with the one from children
+    grid.solid_mask = solid_mask
+    grid.is_wind_tunnel = metadata["is_wind_tunnel"]
+
+    return grid
+
+
+jax.tree_util.register_pytree_node(
+    FluidGrid, _fluid_grid_flatten, _fluid_grid_unflatten
 )
 
 
