@@ -122,7 +122,7 @@ def create_solid_mask(
         solid_mask = solid_mask.at[0, :].set(True)
         solid_mask = solid_mask.at[-1, :].set(True)
         solid_mask = solid_mask.at[:, 0].set(True)
-    if boundary == 2:
+    if boundary == 1:
         solid_mask = solid_mask.at[:, -1].set(True)
 
     if sdf_fn is not None:
