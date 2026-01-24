@@ -160,7 +160,7 @@ def main():
             dt=dt,
             diffusion=0.0001,
             viscosity=0.0,
-            boundary_solid=True,
+            boundary_type=1,
             sdf=sdf_fn,
             visualise=False,
         )
