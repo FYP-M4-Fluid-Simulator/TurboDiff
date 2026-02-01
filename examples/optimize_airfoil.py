@@ -185,21 +185,7 @@ def main():
 
     # Visualization
     print("\nGenerating visualization...")
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-
-    axes[0].plot(loss_history, "b-", linewidth=2)
-    axes[0].set_xlabel("Iteration")
-    axes[0].set_ylabel("Loss")
-    axes[0].set_title("Optimization Progress")
-    axes[0].grid(True, alpha=0.3)
-
-    axes[1].plot(cl_history, "g-", linewidth=2, label="CL")
-    axes[1].plot(cd_history, "r-", linewidth=2, label="CD")
-    axes[1].set_xlabel("Iteration")
-    axes[1].set_ylabel("Coefficient")
-    axes[1].set_title("Lift & Drag Coefficients")
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
+    fig, ax = plt.subplots(1, 1, figsize=(10, 5))
 
     x_init, y_upper_init, y_lower_init = generate_cst_coords(
         initial_upper, initial_lower
@@ -208,13 +194,13 @@ def main():
         final_upper, final_lower
     )
 
-    axes[2].fill_between(
+    ax.fill_between(
         x_init, y_lower_init, y_upper_init, alpha=0.3, color="red", label="Initial"
     )
-    axes[2].plot(x_init, y_upper_init, "r--", linewidth=1.5)
-    axes[2].plot(x_init, y_lower_init, "r--", linewidth=1.5)
+    ax.plot(x_init, y_upper_init, "r--", linewidth=1.5)
+    ax.plot(x_init, y_lower_init, "r--", linewidth=1.5)
 
-    axes[2].fill_between(
+    ax.fill_between(
         x_final,
         y_lower_final,
         y_upper_final,
@@ -222,15 +208,15 @@ def main():
         color="green",
         label="Optimized",
     )
-    axes[2].plot(x_final, y_upper_final, "g-", linewidth=2)
-    axes[2].plot(x_final, y_lower_final, "g-", linewidth=2)
+    ax.plot(x_final, y_upper_final, "g-", linewidth=2)
+    ax.plot(x_final, y_lower_final, "g-", linewidth=2)
 
-    axes[2].set_xlabel("x/c")
-    axes[2].set_ylabel("y/c")
-    axes[2].set_title("Airfoil Shape Evolution")
-    axes[2].legend()
-    axes[2].axis("equal")
-    axes[2].grid(True, alpha=0.3)
+    ax.set_xlabel("x/c")
+    ax.set_ylabel("y/c")
+    ax.set_title("Airfoil Shape Evolution")
+    ax.legend()
+    ax.axis("equal")
+    ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
     output_file = "airfoil_optimization.png"
