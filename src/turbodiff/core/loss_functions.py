@@ -200,6 +200,105 @@ def pressure_drop_loss(
     return pressure_drop
 
 
+# ============================================================================
+# Airfoil Geometric Constraints
+# ============================================================================
+
+
+def thickness_constraint_loss(
+    thickness: Array,
+    min_thickness: float = 0.08,
+    max_thickness: float = 0.22,
+    weight: float = 500.0,
+) -> float:
+    """
+    Penalize airfoil thickness outside allowed range.
+
+    Args:
+        thickness: Thickness values at each chordwise location
+        min_thickness: Minimum allowed thickness
+        max_thickness: Maximum allowed thickness
+        weight: Penalty weight
+
+    Returns:
+        Thickness constraint loss (0 if within bounds)
+    """
+    max_t = jnp.max(thickness)
+
+    # Penalize if too thin
+    too_thin = jnp.maximum(0.0, min_thickness - max_t)
+
+    # Penalize if too thick
+    too_thick = jnp.maximum(0.0, max_t - max_thickness)
+
+    return (too_thin + too_thick) * weight
+
+
+def crossover_validity_loss(
+    y_upper: Array,
+    y_lower: Array,
+    weight: float = 1000.0,
+) -> float:
+    """
+    Penalize invalid airfoil geometry where upper surface crosses below lower.
+
+    Args:
+        y_upper: Upper surface y-coordinates
+        y_lower: Lower surface y-coordinates
+        weight: Penalty weight
+
+    Returns:
+        Validity loss (0 if valid geometry)
+    """
+    # Thickness at each point
+    thickness = y_upper - y_lower
+
+    # Penalize negative thickness (crossover)
+    crossover_violation = jnp.maximum(0.0, -thickness)
+
+    return jnp.sum(crossover_violation) * weight
+
+
+def airfoil_combined_loss(
+    C_L: float,
+    C_D: float,
+    geo_loss: float,
+    w_lift: float = 1000.0,
+    w_drag: float = 100.0,
+    w_ratio: float = 100.0,
+    epsilon: float = 1e-12,
+) -> float:
+    """
+    Combined loss for airfoil optimization.
+
+    Maximizes lift, minimizes drag, maximizes L/D ratio,
+    while respecting geometric constraints.
+
+    Args:
+        C_L: Lift coefficient
+        C_D: Drag coefficient
+        geo_loss: Geometric constraint loss
+        w_lift: Weight for lift (negative because we maximize)
+        w_drag: Weight for drag magnitude
+        w_ratio: Weight for L/D ratio (negative because we maximize)
+        epsilon: Small value to avoid division by zero
+
+    Returns:
+        Combined loss for minimization
+    """
+    # Maximize lift -> minimize negative lift
+    loss_lift = -C_L * w_lift
+
+    # Minimize drag magnitude
+    loss_drag = jnp.abs(C_D) * w_drag
+
+    # Maximize L/D -> minimize -L/D
+    C_D_safe = jnp.maximum(jnp.abs(C_D), epsilon)
+    loss_ratio = -(C_L / C_D_safe) * w_ratio
+
+    return loss_lift + loss_drag + loss_ratio + geo_loss
+
+
 __all__ = [
     "drag_loss",
     "lift_loss",
@@ -207,4 +306,7 @@ __all__ = [
     "velocity_magnitude_loss",
     "turbulent_kinetic_energy_loss",
     "pressure_drop_loss",
+    "thickness_constraint_loss",
+    "crossover_validity_loss",
+    "airfoil_combined_loss",
 ]
