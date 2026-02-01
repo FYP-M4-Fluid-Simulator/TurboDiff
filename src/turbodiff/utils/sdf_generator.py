@@ -84,6 +84,10 @@ def create_sdf_function(dat_filepath, chord_length, offset_x, offset_y):
     """
     coords = load_dat_file(dat_filepath)
     points = np.array(coords)
+
+    # Flip y-coordinates to match grid coordinate system (row 0 at top)
+    points[:, 1] = -points[:, 1]
+
     points *= chord_length
     points[:, 0] += offset_x
     points[:, 1] += offset_y
