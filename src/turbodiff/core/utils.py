@@ -99,7 +99,7 @@ def sample_staggered_velocity_at(
 
 
 def create_solid_mask(
-    resolution: tuple[int, int], boundary: int = 1, sdf_fn=None
+    resolution: tuple[int, int], boundary: int = 1, sdf_fn=None, smoothing=0.1
 ) -> Array:
     """
     Create solid cell mask for the grid.
@@ -133,9 +133,61 @@ def create_solid_mask(
 
         # Evaluate SDF and mark solid where SDF < 0
         sdf_values = sdf_fn(i_grid, j_grid)
-        solid_mask = jnp.logical_or(solid_mask, sdf_values < 0)
+        solid_mask = jnp.maximum(solid_mask, 1 - jax.nn.sigmoid(sdf_values / smoothing))
 
     return solid_mask
+
+import jax.numpy as jnp
+
+def create_solid_border(
+    window_size: tuple[int, int],
+    cell_size: float,
+    sdf_fn=None,
+    thickness=0.2
+) -> list[tuple[int, int]]:
+    """
+    Create a list of solid border cell indices based on a signed distance function.
+
+    Cells are marked as solid if the absolute value of the signed distance
+    is smaller than the given thickness.
+
+    Args:
+        window_size: (height, width) of the grid
+        cell_size: Physical size of a grid cell (used to scale coordinates)
+        sdf_fn: Optional signed distance function sdf(i, j)
+                Values near zero represent the boundary
+        thickness: Rough measure of thickness of the solid border
+
+    Returns:
+        List of (i, j) index tuples representing solid border cells
+    """
+    if sdf_fn is None:
+        return []
+
+    # Create coordinate grid
+    i_grid, j_grid = jnp.meshgrid(
+        jnp.arange(window_size[0]),
+        jnp.arange(window_size[1]),
+        indexing="ij",
+    )
+
+    i_grid = i_grid / cell_size
+    j_grid = j_grid / cell_size
+
+    # Compute sdf at each pixel
+    sdf_values = sdf_fn(i_grid, j_grid)
+
+    # Identify points where sign changes (left to right)
+    sdf_values_sign_left = jax.nn.sigmoid(sdf_values[:,:-1]) > 0.5 - thickness
+    sdf_values_sign_right = jax.nn.sigmoid(sdf_values[:,1:]) > 0.5 + thickness
+    border = jnp.logical_xor(sdf_values_sign_left, sdf_values_sign_right)
+    
+    # Identify border cells
+    indices = jnp.argwhere(border)
+
+    return [tuple(idx) for idx in indices.tolist()]
+
+
 
 
 @jax.jit

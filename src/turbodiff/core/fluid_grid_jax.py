@@ -18,6 +18,7 @@ from jax import Array
 from turbodiff.core.grids import Grid, StaggeredGrid
 from turbodiff.core.utils import (
     create_solid_mask,
+    create_solid_border,
     apply_zero_velocity_at_solids,
     bilinear_interpolate,
 )
@@ -129,6 +130,7 @@ class FluidGrid:
             self.screen = pygame.display.set_mode(
                 (self.width * self.display_size, self.height * self.display_size)
             )
+            self.solid_border = create_solid_border(pygame.display.get_window_size()[::-1], self.display_size, sdf)
             self.clock = pygame.time.Clock()
 
     def create_initial_state(
@@ -230,7 +232,7 @@ class FluidGrid:
         a = dt * diffusion / (cell_size * cell_size)
 
         # Precompute a mask for fluid interior cells
-        interior_mask = (~solid)[1:-1, 1:-1]  # True only where not solid
+        interior_mask = (1.0 - solid)[1:-1, 1:-1]  # True only where not solid
 
         @jax.jit
         def gs_iteration(d_tuple):
@@ -245,10 +247,10 @@ class FluidGrid:
             right = d[1:-1, 2:]
 
             # Neighbor counts (skip solids)
-            n_up = (~solid[:-2, 1:-1]).astype(jnp.float32)
-            n_down = (~solid[2:, 1:-1]).astype(jnp.float32)
-            n_left = (~solid[1:-1, :-2]).astype(jnp.float32)
-            n_right = (~solid[1:-1, 2:]).astype(jnp.float32)
+            n_up = (1.0 - solid[:-2, 1:-1]).astype(jnp.float32)
+            n_down = (1.0 - solid[2:, 1:-1]).astype(jnp.float32)
+            n_left = (1.0 - solid[1:-1, :-2]).astype(jnp.float32)
+            n_right = (1.0 - solid[1:-1, 2:]).astype(jnp.float32)
 
             neighbors = up * n_up + down * n_down + left * n_left + right * n_right
 
@@ -260,7 +262,7 @@ class FluidGrid:
             new_center = (center + a * neighbors) / (1.0 + a * neighbor_counts)
 
             # Do not modify solid cells
-            new_center = jnp.where(interior_mask, new_center, center)
+            new_center = interior_mask * new_center + (1 - interior_mask) * center
 
             # Write back into full grid
             return (d.at[1:-1, 1:-1].set(new_center), d0)
@@ -408,7 +410,7 @@ class FluidGrid:
         )
 
         # Apply solid boundary conditions
-        new_u, new_v = apply_zero_velocity_at_solids(new_u, new_v, state.solid_mask)
+        # new_u, new_v = apply_zero_velocity_at_solids(new_u, new_v, state.solid_mask)
 
         return state.__class__(
             density=state.density,
@@ -506,7 +508,7 @@ class FluidGrid:
             left_contrib = jnp.zeros_like(p)
             left_count = jnp.zeros_like(p)
             left_contrib = left_contrib.at[:, 1:].set(p[:, :-1])
-            left_count = left_count.at[:, 1:].set((~solid[:, :-1]).astype(jnp.float32))
+            left_count = left_count.at[:, 1:].set((1.0 - solid[:, :-1]).astype(jnp.float32))
             neighbor_sum += left_contrib * left_count
             neighbor_count += left_count
 
@@ -515,7 +517,7 @@ class FluidGrid:
             right_count = jnp.zeros_like(p)
             right_contrib = right_contrib.at[:, :-1].set(p[:, 1:])
             right_count = right_count.at[:, :-1].set(
-                (~solid[:, 1:]).astype(jnp.float32)
+                (1.0 - solid[:, 1:]).astype(jnp.float32)
             )
             neighbor_sum += right_contrib * right_count
             neighbor_count += right_count
@@ -524,7 +526,7 @@ class FluidGrid:
             up_contrib = jnp.zeros_like(p)
             up_count = jnp.zeros_like(p)
             up_contrib = up_contrib.at[1:, :].set(p[:-1, :])
-            up_count = up_count.at[1:, :].set((~solid[:-1, :]).astype(jnp.float32))
+            up_count = up_count.at[1:, :].set((1.0 - solid[:-1, :]).astype(jnp.float32))
             neighbor_sum += up_contrib * up_count
             neighbor_count += up_count
 
@@ -532,7 +534,7 @@ class FluidGrid:
             down_contrib = jnp.zeros_like(p)
             down_count = jnp.zeros_like(p)
             down_contrib = down_contrib.at[:-1, :].set(p[1:, :])
-            down_count = down_count.at[:-1, :].set((~solid[1:, :]).astype(jnp.float32))
+            down_count = down_count.at[:-1, :].set((1.0 - solid[1:, :]).astype(jnp.float32))
             neighbor_sum += down_contrib * down_count
             neighbor_count += down_count
 
@@ -921,7 +923,8 @@ class FluidGrid:
         for i in range(self.height):
             for j in range(self.width):
                 if solid_mask_array[i, j]:
-                    color = (0, 0, 0)
+                    shade = solid_mask_array[i, j] * 255
+                    color = (shade, shade, shade)
                 else:
                     if self.show_cell_property == "density":
                         GRAY_VALUE = 30
@@ -1129,6 +1132,16 @@ class FluidGrid:
                             True,
                             [(x, end_y), (left_x, left_y), (right_x, right_y)],
                         )
+        
+        # Draw shape border
+        for i, j in self.solid_border:
+            x = j * 1
+            y = i * 1
+            pygame.draw.rect(
+                self.screen,
+                (255, 191, 0),
+                pygame.Rect(x, y, 1, 1),
+            )
 
         # Cursor indicator when in painting mode
         keys = pygame.key.get_pressed()
