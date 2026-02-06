@@ -10,8 +10,8 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
 from turbodiff import FluidGrid
-from turbodiff.core.airfoil import generate_cst_coords, thickness_at_x
-from turbodiff.core.masking import create_airfoil_mask, interpolate_surface_to_grid
+from turbodiff.core.airfoil import generate_cst_coords, thickness_at_x, cst_to_closed_contour
+from turbodiff.core.masking import soft_sigmoid_mask
 from turbodiff.core.loss_functions import (
     thickness_constraint_loss,
     crossover_validity_loss,
@@ -29,32 +29,81 @@ INFLOW_VELOCITY = 1.0
 CHORD = 3.0
 
 
-def create_airfoil_mask_from_weights(
-    weights_upper, weights_lower, grid_x, grid_y, offset_x, offset_y, chord
+def compute_airfoil_sdf(
+    grid_x, grid_y, weights_upper, weights_lower, offset_x, offset_y, chord
 ):
+    """
+    Compute signed distance field for CST airfoil.
+    
+    Returns negative values inside the airfoil, positive outside.
+    Uses the contour points to compute approximate distances.
+    """
+    # Generate CST coordinates
     x_cst, y_upper_cst, y_lower_cst = generate_cst_coords(
-        weights_upper, weights_lower, num_points=100
+        weights_upper, weights_lower, num_points=200
     )
+    
+    # Create closed contour
+    x_contour, y_contour = cst_to_closed_contour(x_cst, y_upper_cst, y_lower_cst)
+    
+    # Transform to world coordinates
+    x_world = x_contour * chord + offset_x
+    y_world = y_contour * chord + offset_y
+    
+    # Stack contour points: shape (num_points, 2)
+    contour_points = jnp.stack([x_world, y_world], axis=1)
+    
+    # Flatten grid points
+    grid_points = jnp.stack([grid_x.flatten(), grid_y.flatten()], axis=1)
+    
+    # Compute distances to all contour points for each grid point
+    # grid_points: (H*W, 2), contour_points: (num_contour, 2)
+    # Broadcast to (H*W, num_contour, 2)
+    diff = grid_points[:, None, :] - contour_points[None, :, :]
+    distances = jnp.sqrt(jnp.sum(diff**2, axis=2))  # (H*W, num_contour)
+    
+    # Minimum distance to surface for each grid point
+    min_dist = jnp.min(distances, axis=1)  # (H*W,)
+    
+    # Determine inside/outside using point-in-polygon test
+    # Simple approach: check if point is between upper and lower surfaces
+    # For each x position, interpolate upper and lower y values
+    grid_x_norm = (grid_x - offset_x) / chord
+    
+    # Interpolate upper and lower surfaces at grid x positions
+    y_upper_interp = jnp.interp(grid_x_norm.flatten(), x_cst, y_upper_cst)
+    y_lower_interp = jnp.interp(grid_x_norm.flatten(), x_cst, y_lower_cst)
+    
+    # Transform to world coordinates
+    y_upper_world = y_upper_interp * chord + offset_y
+    y_lower_world = y_lower_interp * chord + offset_y
+    
+    # Check if point is inside: between surfaces and within chord
+    grid_y_flat = grid_y.flatten()
+    grid_x_flat = grid_x.flatten()
+    
+    is_between_surfaces = (grid_y_flat >= y_lower_world) & (grid_y_flat <= y_upper_world)
+    is_within_chord = (grid_x_flat >= offset_x) & (grid_x_flat <= offset_x + chord)
+    is_inside = is_between_surfaces & is_within_chord
+    
+    # Apply sign: negative inside, positive outside
+    sdf = jnp.where(is_inside, -min_dist, min_dist)
+    
+    return sdf.reshape(grid_x.shape)
 
-    x_world = x_cst * chord + offset_x
-    y_upper_world = y_upper_cst * chord + offset_y
-    y_lower_world = y_lower_cst * chord + offset_y
 
-    y_upper_grid = interpolate_surface_to_grid(grid_x, x_world, y_upper_world)
-    y_lower_grid = interpolate_surface_to_grid(grid_x, x_world, y_lower_world)
-
-    return create_airfoil_mask(
-        grid_x,
-        grid_y,
-        y_upper_grid,
-        y_lower_grid,
-        x_min=offset_x,
-        x_max=offset_x + chord,
-        sharpness=50.0,
+def create_airfoil_mask_from_sdf(
+    weights_upper, weights_lower, grid_x, grid_y, offset_x, offset_y, chord, sharpness=50.0
+):
+    """Create soft mask from SDF using sigmoid."""
+    sdf = compute_airfoil_sdf(
+        grid_x, grid_y, weights_upper, weights_lower, offset_x, offset_y, chord
     )
+    # Convert SDF to mask: negative (inside) -> 1, positive (outside) -> 0
+    return soft_sigmoid_mask(sdf, sharpness)
 
 
-def compute_loss_with_aux(params, grid_x, grid_y, offset_x, offset_y, chord):
+def compute_loss_with_aux(params, grid_x, grid_y, offset_x, offset_y, chord, sim):
     n_weights = N_ORDER + 1
     weights_upper = params[:n_weights]
     weights_lower = params[n_weights:]
@@ -65,27 +114,33 @@ def compute_loss_with_aux(params, grid_x, grid_y, offset_x, offset_y, chord):
         thickness, 0.06, 0.25
     )
 
-    obstacle_mask = create_airfoil_mask_from_weights(
-        weights_upper, weights_lower, grid_x, grid_y, offset_x, offset_y, chord
+    # Compute SDF and convert to mask
+    sdf = compute_airfoil_sdf(
+        grid_x, grid_y, weights_upper, weights_lower, offset_x, offset_y, chord
     )
+    obstacle_mask = soft_sigmoid_mask(sdf, sharpness=50.0)
 
-    sim = FluidGrid(
-        height=GRID_HEIGHT,
-        width=GRID_WIDTH,
-        cell_size=CELL_SIZE,
-        dt=0.05,
-        diffusion=0.001,
-        boundary_type=2,
-        visualise=False,
-    )
-
+    # Create initial state and update solid_mask
     state = sim.create_initial_state()
+    # Update the solid_mask in the state to use our computed mask
+    state = state.__class__(
+        density=state.density,
+        velocity=state.velocity,
+        pressure=state.pressure,
+        solid_mask=obstacle_mask,
+        sources=state.sources,
+        time=state.time,
+        step=state.step,
+    )
     state = sim.set_velocity_field(state, "wind tunnel")
 
-    def step_fn(i, s):
-        return sim.step(s)
-
-    state = jax.lax.fori_loop(0, NUM_SIM_STEPS, step_fn, state)
+    # Run simulation using scan for efficiency and differentiation support
+    def simulation_step(carry_state, _):
+        """Single simulation step - scan compatible."""
+        new_state = sim.step(carry_state)
+        return new_state, None
+    
+    state, _ = jax.lax.scan(simulation_step, state, None, length=NUM_SIM_STEPS)
 
     pressure = state.pressure.values
     cell_volume = CELL_SIZE**2
@@ -117,8 +172,8 @@ def compute_loss_with_aux(params, grid_x, grid_y, offset_x, offset_y, chord):
     return total_loss, (C_L, C_D, lift_force, drag_force)
 
 
-def compute_loss(params, grid_x, grid_y, offset_x, offset_y, chord):
-    loss, _ = compute_loss_with_aux(params, grid_x, grid_y, offset_x, offset_y, chord)
+def compute_loss(params, grid_x, grid_y, offset_x, offset_y, chord, sim):
+    loss, _ = compute_loss_with_aux(params, grid_x, grid_y, offset_x, offset_y, chord, sim)
     return loss
 
 
@@ -144,11 +199,22 @@ def main():
     print(f"\nGrid: {GRID_HEIGHT}x{GRID_WIDTH}, Sim steps: {NUM_SIM_STEPS}")
     print(f"CST order: {N_ORDER}, Weights per surface: {n_weights}")
 
+    # Create simulator once (without SDF, we'll update solid_mask in each iteration)
+    sim = FluidGrid(
+        height=GRID_HEIGHT,
+        width=GRID_WIDTH,
+        cell_size=CELL_SIZE,
+        dt=0.05,
+        diffusion=0.001,
+        boundary_type=2,
+        visualise=False,
+    )
+
     def loss_fn(p):
-        return compute_loss(p, grid_x, grid_y, offset_x, offset_y, CHORD)
+        return compute_loss(p, grid_x, grid_y, offset_x, offset_y, CHORD, sim)
 
     def aux_fn(p):
-        return compute_loss_with_aux(p, grid_x, grid_y, offset_x, offset_y, CHORD)
+        return compute_loss_with_aux(p, grid_x, grid_y, offset_x, offset_y, CHORD, sim)
 
     grad_fn = jax.grad(loss_fn)
 

@@ -210,7 +210,7 @@ class FluidGrid:
             step=state.step,
         )
 
-    @jax.jit
+    @jax.jit(static_argnames=('num_iters',))
     def diffuse_density(self, state: FluidState, num_iters: int = 20) -> FluidState:
         """
         Perform Gauss–Seidel diffusion on the density field in a JAX-friendly way.
@@ -235,10 +235,10 @@ class FluidGrid:
         interior_mask = (1.0 - solid)[1:-1, 1:-1]  # True only where not solid
 
         @jax.jit
-        def gs_iteration(d_tuple):
+        def gs_iteration(carry, _):
             """One Gauss–Seidel-like update using vectorized neighbor sampling."""
 
-            d, d0 = d_tuple
+            d, d0 = carry
 
             # Shifted neighbor fields (up, down, left, right)
             up = d[:-2, 1:-1]
@@ -265,11 +265,11 @@ class FluidGrid:
             new_center = interior_mask * new_center + (1 - interior_mask) * center
 
             # Write back into full grid
-            return (d.at[1:-1, 1:-1].set(new_center), d0)
+            return (d.at[1:-1, 1:-1].set(new_center), d0), None
 
-        # Run repeated iterations
-        new_density, _ = jax.lax.fori_loop(
-            0, num_iters, lambda _, d: gs_iteration(d), (density, density0)
+        # Run repeated iterations using scan for differentiability
+        (new_density, _), _ = jax.lax.scan(
+            gs_iteration, (density, density0), None, length=num_iters
         )
 
         # Produce new state
@@ -480,7 +480,7 @@ class FluidGrid:
 
         return div
 
-    @jax.jit
+    @jax.jit(static_argnames=('num_iters',))
     def solve_pressure(self, state: FluidState, num_iters: int = 30) -> FluidState:
         """
         Solve for pressure using Gauss-Seidel iterations.
@@ -503,8 +503,9 @@ class FluidGrid:
         scale = self.cell_size * self.cell_size / self.dt
 
         @jax.jit
-        def gs_iteration(p_div):
-            p, div = p_div
+        def gs_iteration(carry, _):
+            """Single Gauss-Seidel iteration - scan compatible."""
+            p, div = carry
 
             neighbor_sum = jnp.zeros_like(p)
             neighbor_count = jnp.zeros_like(p)
@@ -551,10 +552,11 @@ class FluidGrid:
             # Zero out pressure in fully solid cells (solid_mask >= 0.999)
             new_p = jnp.where(solid >= 0.999, 0.0, new_p)
 
-            return (new_p, div)
+            return (new_p, div), None
 
-        pressure, _ = jax.lax.fori_loop(
-            0, num_iters, lambda _, p: gs_iteration(p), (pressure, divergence)
+        # Use scan instead of fori_loop for reverse-mode differentiation
+        (pressure, _), _ = jax.lax.scan(
+            gs_iteration, (pressure, divergence), None, length=num_iters
         )
 
         return state.__class__(
