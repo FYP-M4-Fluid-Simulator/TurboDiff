@@ -119,12 +119,11 @@ def create_solid_mask(
 
     if boundary:
         # Mark boundary cells as solid
-        solid_mask = solid_mask.at[0, :].set(True)
-        solid_mask = solid_mask.at[-1, :].set(True)
-        solid_mask = solid_mask.at[:, 0].set(True)
+        solid_mask = solid_mask.at[0, :].set(1.0)
+        solid_mask = solid_mask.at[-1, :].set(1.0)
+        solid_mask = solid_mask.at[:, 0].set(1.0)
     if boundary == 1:
-        solid_mask = solid_mask.at[:, -1].set(True)
-
+        solid_mask = solid_mask.at[:, -1].set(1.0)
     if sdf_fn is not None:
         # Create coordinate grids
         i_grid, j_grid = jnp.meshgrid(
@@ -136,6 +135,83 @@ def create_solid_mask(
         solid_mask = jnp.maximum(solid_mask, 1 - jax.nn.sigmoid(sdf_values / smoothing))
 
     return solid_mask
+
+def create_u_face_mask(
+    resolution: tuple[int, int], boundary: int = 1, sdf_fn=None, smoothing=0.1
+) -> Array:
+    """
+    Create face mask for the vertical faces.
+
+    Args:
+        resolution: (height, width) of the grid
+        boundary: 0 -> No Boundary, 1 -> Complete Boundary, 2 -> No right boundary
+        sdf_fn: Optional signed distance function sdf(i, j) < 0 means solid
+
+    Returns:
+        Boolean array, shape (height, width), True = solid
+    """
+    height, width = resolution
+
+    # Initialize as all fluid
+    u_face_mask = jnp.zeros((height, width + 1), dtype=bool)
+
+    if boundary:
+        # Mark boundary cells as solid
+        u_face_mask = u_face_mask.at[0, :].set(1.0)
+        u_face_mask = u_face_mask.at[-1, :].set(1.0)
+        u_face_mask = u_face_mask.at[:, :2].set(1.0)
+    if boundary == 1:
+        u_face_mask = u_face_mask.at[:, -2:].set(1.0)
+    if sdf_fn is not None:
+        # Create coordinate grids
+        i_grid, j_grid = jnp.meshgrid(
+            jnp.arange(height), jnp.arange(width+1), indexing="ij"
+        )
+        j_grid = j_grid - 0.5  # Shift to face centers
+        
+        # Evaluate SDF and mark solid where SDF < 0
+        sdf_values = sdf_fn(i_grid, j_grid)
+        u_face_mask = jnp.maximum(u_face_mask, 1 - jax.nn.sigmoid(sdf_values / smoothing))
+
+    return u_face_mask
+
+def create_v_face_mask(
+    resolution: tuple[int, int], boundary: int = 1, sdf_fn=None, smoothing=0.1
+) -> Array:
+    """
+    Create face mask for the horizontal faces.
+
+    Args:
+        resolution: (height, width) of the grid
+        boundary: 0 -> No Boundary, 1 -> Complete Boundary, 2 -> No right boundary
+        sdf_fn: Optional signed distance function sdf(i, j) < 0 means solid
+
+    Returns:
+        Boolean array, shape (height, width), True = solid
+    """
+    height, width = resolution
+
+    # Initialize as all fluid
+    v_face_mask = jnp.zeros((height + 1, width), dtype=bool)
+
+    if boundary:
+        # Mark boundary cells as solid
+        v_face_mask = v_face_mask.at[:2, :].set(1.0)
+        v_face_mask = v_face_mask.at[-2:, :].set(1.0)
+        v_face_mask = v_face_mask.at[:, 1].set(1.0)
+    if boundary == 1:
+        v_face_mask = v_face_mask.at[:, -1].set(1.0)
+    if sdf_fn is not None:
+        # Create coordinate grids
+        i_grid, j_grid = jnp.meshgrid(
+            jnp.arange(height+1), jnp.arange(width), indexing="ij"
+        )
+        i_grid = i_grid - 0.5  # Shift to face centers
+
+        # Evaluate SDF and mark solid where SDF < 0
+        sdf_values = sdf_fn(i_grid, j_grid)
+        v_face_mask = jnp.maximum(v_face_mask, 1 - jax.nn.sigmoid(sdf_values / smoothing))
+    return v_face_mask
 
 import jax.numpy as jnp
 

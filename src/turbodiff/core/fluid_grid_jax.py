@@ -484,6 +484,9 @@ class FluidGrid:
     def solve_pressure(self, state: FluidState, num_iters: int = 30) -> FluidState:
         """
         Solve for pressure using Gauss-Seidel iterations.
+        
+        Handles partial masking where solid_mask values between 0 and 1
+        represent fractional solid coverage for sub-grid resolution obstacles.
 
         Args:
             state: Current simulation state
@@ -494,6 +497,8 @@ class FluidGrid:
         """
         divergence = self.compute_divergence(state)
         solid = state.solid_mask
+        # Compute fluid fraction (1.0 = fully fluid, 0.0 = fully solid)
+        fluid_fraction = 1.0 - solid
         pressure = jnp.zeros((self.height, self.width))
         scale = self.cell_size * self.cell_size / self.dt
 
@@ -504,45 +509,47 @@ class FluidGrid:
             neighbor_sum = jnp.zeros_like(p)
             neighbor_count = jnp.zeros_like(p)
 
-            # Left neighbor
+            # Left neighbor - weighted by fluid fraction
             left_contrib = jnp.zeros_like(p)
-            left_count = jnp.zeros_like(p)
+            left_weight = jnp.zeros_like(p)
             left_contrib = left_contrib.at[:, 1:].set(p[:, :-1])
-            left_count = left_count.at[:, 1:].set((1.0 - solid[:, :-1]).astype(jnp.float32))
-            neighbor_sum += left_contrib * left_count
-            neighbor_count += left_count
+            left_weight = left_weight.at[:, 1:].set(fluid_fraction[:, :-1])
+            neighbor_sum += left_contrib * left_weight
+            neighbor_count += left_weight
 
-            # Right neighbor
+            # Right neighbor - weighted by fluid fraction
             right_contrib = jnp.zeros_like(p)
-            right_count = jnp.zeros_like(p)
+            right_weight = jnp.zeros_like(p)
             right_contrib = right_contrib.at[:, :-1].set(p[:, 1:])
-            right_count = right_count.at[:, :-1].set(
-                (1.0 - solid[:, 1:]).astype(jnp.float32)
-            )
-            neighbor_sum += right_contrib * right_count
-            neighbor_count += right_count
+            right_weight = right_weight.at[:, :-1].set(fluid_fraction[:, 1:])
+            neighbor_sum += right_contrib * right_weight
+            neighbor_count += right_weight
 
-            # Up neighbor
+            # Up neighbor - weighted by fluid fraction
             up_contrib = jnp.zeros_like(p)
-            up_count = jnp.zeros_like(p)
+            up_weight = jnp.zeros_like(p)
             up_contrib = up_contrib.at[1:, :].set(p[:-1, :])
-            up_count = up_count.at[1:, :].set((1.0 - solid[:-1, :]).astype(jnp.float32))
-            neighbor_sum += up_contrib * up_count
-            neighbor_count += up_count
+            up_weight = up_weight.at[1:, :].set(fluid_fraction[:-1, :])
+            neighbor_sum += up_contrib * up_weight
+            neighbor_count += up_weight
 
-            # Down neighbor
+            # Down neighbor - weighted by fluid fraction
             down_contrib = jnp.zeros_like(p)
-            down_count = jnp.zeros_like(p)
+            down_weight = jnp.zeros_like(p)
             down_contrib = down_contrib.at[:-1, :].set(p[1:, :])
-            down_count = down_count.at[:-1, :].set((1.0 - solid[1:, :]).astype(jnp.float32))
-            neighbor_sum += down_contrib * down_count
-            neighbor_count += down_count
+            down_weight = down_weight.at[:-1, :].set(fluid_fraction[1:, :])
+            neighbor_sum += down_contrib * down_weight
+            neighbor_count += down_weight
 
-            div_contrib = div * scale
+            # Scale divergence by fluid fraction for partially solid cells
+            # Only the fluid portion needs to satisfy incompressibility
+            div_contrib = div * scale * fluid_fraction
+            # Only solve for pressure in cells with some fluid fraction
             new_p = jnp.where(
                 neighbor_count > 0, (neighbor_sum - div_contrib) / neighbor_count, 0.0
             )
-            new_p = jnp.where(solid, 0.0, new_p)
+            # Zero out pressure in fully solid cells (solid_mask >= 0.999)
+            new_p = jnp.where(solid >= 0.999, 0.0, new_p)
 
             return (new_p, div)
 
@@ -564,6 +571,9 @@ class FluidGrid:
     def project_velocity(self, state: FluidState) -> FluidState:
         """
         Make velocity field divergence-free by subtracting pressure gradient.
+        
+        Handles partial masking by scaling pressure gradients by the average
+        fluid fraction at face boundaries.
 
         Args:
             state: Current simulation state (with solved pressure)
@@ -575,28 +585,38 @@ class FluidGrid:
         u = state.velocity.u
         v = state.velocity.v
         solid = state.solid_mask
+        # Compute fluid fraction (1.0 = fully fluid, 0.0 = fully solid)
+        fluid_fraction = 1.0 - solid
 
-        # Horizontal velocities
+        # Horizontal velocities (u-faces between cells)
         p_left = pressure[:, :-1]
         p_right = pressure[:, 1:]
         grad_u = -(p_right - p_left) * self.dt / self.cell_size
 
-        solid_left = solid[:, :-1]
-        solid_right = solid[:, 1:]
-        solid_mask_u = jnp.logical_or(solid_left, solid_right)
-        grad_u_masked = jnp.where(solid_mask_u, 0.0, grad_u)
+        # For partial masking: average fluid fraction at the face
+        # u[i,j] is between cells [i, j-1] and [i, j]
+        fluid_left = fluid_fraction[:, :-1]
+        fluid_right = fluid_fraction[:, 1:]
+        # Use average fluid fraction at the face
+        fluid_at_u_face = (fluid_left + fluid_right) / 2.0
+        # Zero out gradient where face is mostly solid (avg fluid fraction < 0.001)
+        grad_u_masked = jnp.where(fluid_at_u_face > 0.001, grad_u * fluid_at_u_face, 0.0)
 
         new_u = u.at[:, 1:-1].add(grad_u_masked)
 
-        # Vertical velocities
+        # Vertical velocities (v-faces between cells)
         p_up = pressure[:-1, :]
         p_down = pressure[1:, :]
         grad_v = -(p_down - p_up) * self.dt / self.cell_size
 
-        solid_up = solid[:-1, :]
-        solid_down = solid[1:, :]
-        solid_mask_v = jnp.logical_or(solid_up, solid_down)
-        grad_v_masked = jnp.where(solid_mask_v, 0.0, grad_v)
+        # For partial masking: average fluid fraction at the face
+        # v[i,j] is between cells [i-1, j] and [i, j]
+        fluid_up = fluid_fraction[:-1, :]
+        fluid_down = fluid_fraction[1:, :]
+        # Use average fluid fraction at the face
+        fluid_at_v_face = (fluid_up + fluid_down) / 2.0
+        # Zero out gradient where face is mostly solid (avg fluid fraction < 0.001)
+        grad_v_masked = jnp.where(fluid_at_v_face > 0.001, grad_v * fluid_at_v_face, 0.0)
 
         new_v = v.at[1:-1, :].add(grad_v_masked)
 
