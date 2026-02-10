@@ -33,6 +33,44 @@ A differentiable fluid simulation pipeline for Wind Turbine Shape Optimization
 1. Modify files in docs
 2. Compile docs by going into `docs/` and running `make html` command
 
+# Streaming API (FastAPI)
+
+Run the WebSocket streaming server:
+
+```bash
+uvicorn turbodiff.api.streaming_server:app --reload
+```
+
+Create a session with a POST request (frontend defines conditions and shape):
+
+```bash
+curl -X POST http://localhost:8000/sessions \
+   -H "Content-Type: application/json" \
+   -d '{
+      "fidelity": "medium",
+      "sim_time": 2.0,
+      "dt": 0.01,
+      "cell_size": 0.01,
+      "diffusion": 0.001,
+      "viscosity": 0.0,
+      "boundary_type": 1,
+      "inflow_velocity": 2.0,
+      "stream_fps": 30.0,
+      "stream_every": 1,
+      "angle_of_attack": 5.0,
+      "cst_upper": [0.1, 0.2, 0.3],
+      "cst_lower": [-0.1, -0.2, -0.3],
+      "airfoil_offset_x": 0.2,
+      "airfoil_offset_y": 0.32,
+      "chord_length": 0.25,
+      "num_cst_points": 100,
+      "mask_sharpness": 50.0
+   }'
+```
+
+Then connect to `ws://localhost:8000/ws/{session_id}` and the server will stream
+cell-centered velocity and pressure fields as JSON arrays.
+
 # Coding Conventions
 
 1. PascalCase for classes

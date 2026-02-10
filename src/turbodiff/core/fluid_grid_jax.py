@@ -116,6 +116,8 @@ class FluidGrid:
 
         # Track wind tunnel mode
         self.is_wind_tunnel = False
+        self.inlet_velocity = 2.0
+        self.inlet_angle_rad = 0.0
 
         # Create solid mask
         self.solid_mask = create_solid_mask(
@@ -443,10 +445,16 @@ class FluidGrid:
         v = state.velocity.v
 
         # Set inlet velocity at left boundary (first few columns)
-        inlet_velocity = 2.0
+        inlet_velocity = self.inlet_velocity
+        angle = self.inlet_angle_rad
+        inlet_u = inlet_velocity * jnp.cos(angle)
+        inlet_v = -inlet_velocity * jnp.sin(angle)
         # For staggered grid: u has shape (height, width+1)
         # Set u at the leftmost vertical faces (column 0 and 1)
-        u = u.at[:, 0:2].set(inlet_velocity)
+        u = u.at[:, 0:2].set(inlet_u)
+
+        # Set v at the leftmost horizontal faces (column 0)
+        v = v.at[:, 0:1].set(inlet_v)
 
         # Keep v unchanged (horizontal flow, so v should remain small)
 
@@ -763,8 +771,10 @@ class FluidGrid:
 
         elif field_type == "wind tunnel":
             # Create uniform rightward flow throughout the domain
-            u = jnp.ones((height, width + 1)) * 2.0
-            v = jnp.zeros((height + 1, width))
+            inlet_u = self.inlet_velocity * jnp.cos(self.inlet_angle_rad)
+            inlet_v = -self.inlet_velocity * jnp.sin(self.inlet_angle_rad)
+            u = jnp.ones((height, width + 1)) * inlet_u
+            v = jnp.ones((height + 1, width)) * inlet_v
             # Mark as wind tunnel mode
             self.is_wind_tunnel = True
             # Make right boundary non-solid

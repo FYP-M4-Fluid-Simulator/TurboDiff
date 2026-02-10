@@ -21,6 +21,8 @@ dependencies = [
   "jaxlib>=0.4.20",
   "matplotlib>=3.8",
   "pygame>=2.5",
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
 ]
 
 [project.optional-dependencies]
