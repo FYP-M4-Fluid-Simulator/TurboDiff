@@ -118,7 +118,7 @@ def compute_loss_with_aux(params, grid_x, grid_y, offset_x, offset_y, chord, sim
     sdf = compute_airfoil_sdf(
         grid_x, grid_y, weights_upper, weights_lower, offset_x, offset_y, chord
     )
-    obstacle_mask = soft_sigmoid_mask(sdf, sharpness=50.0)
+    obstacle_mask = soft_sigmoid_mask(sdf, sharpness=1000.0)
 
     # Create initial state and update solid_mask
     state = sim.create_initial_state()
@@ -140,7 +140,10 @@ def compute_loss_with_aux(params, grid_x, grid_y, offset_x, offset_y, chord, sim
         new_state = sim.step(carry_state)
         return new_state, None
     
-    state, _ = jax.lax.scan(simulation_step, state, None, length=NUM_SIM_STEPS)
+    if sim.visualise: # only works once
+        state = sim.simulate(state, steps=NUM_SIM_STEPS)
+    else:
+        state, _ = jax.lax.scan(simulation_step, state, None, length=NUM_SIM_STEPS)
 
     pressure = state.pressure.values
     cell_volume = CELL_SIZE**2
@@ -207,7 +210,10 @@ def main():
         dt=0.05,
         diffusion=0.001,
         boundary_type=2,
-        visualise=False,
+        visualise=False, # only works once then will crash -> for debugging
+        show_velocity=True,
+        show_cell_property="curl",
+        show_cell_centered_velocity=True,
     )
 
     def loss_fn(p):
