@@ -1,11 +1,11 @@
-import asyncio
-import os
-from typing import Dict, Tuple
 from __future__ import annotations
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-import jax.numpy as jnp
-from turbodiff.core.fluid_grid_jax import FluidGrid
+from typing import Dict, Tuple
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from turbodiff.api import validation_server
 
 FIDELITY_MAP: Dict[str, Tuple[int, int]] = {
     "low": (64, 128),
@@ -15,3 +15,12 @@ FIDELITY_MAP: Dict[str, Tuple[int, int]] = {
 
 app = FastAPI(title="TurboDiff Streaming API")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(validation_server.router)
