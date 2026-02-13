@@ -5,7 +5,7 @@ from typing import Dict, Tuple
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from turbodiff.api import validation_server
+from turbodiff.api import validation_server, validation_server_cst
 
 FIDELITY_MAP: Dict[str, Tuple[int, int]] = {
     "low": (64, 128),
@@ -24,3 +24,4 @@ app.add_middleware(
 )
 
 app.include_router(validation_server.router)
+app.include_router(validation_server_cst.router)
