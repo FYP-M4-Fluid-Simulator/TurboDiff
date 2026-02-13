@@ -8,7 +8,7 @@ from itertools import count
 from typing import Dict, List, Tuple
 
 import jax.numpy as jnp
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from turbodiff.core.airfoil_optimization import (
@@ -24,8 +24,7 @@ FIDELITY_MAP: Dict[str, Tuple[int, int]] = {
     "coarse": (256, 512),
 }
 
-
-app = FastAPI(title="TurboDiff Streaming API")
+router = APIRouter()
 
 _SESSION_ID = count(1)
 _SESSIONS: Dict[str, "SessionConfig"] = {}
@@ -33,31 +32,25 @@ _SESSIONS: Dict[str, "SessionConfig"] = {}
 
 class SessionRequest(BaseModel):
     fidelity: str = Field("medium", description="low | medium | coarse")
-    sim_time: float = Field(1.0, ge=0.0, description="Seconds; 0 for infinite")
+    sim_time: float = Field(0.0, ge=0.0, description="Seconds; 0 for infinite")
     dt: float = Field(0.01, gt=0.0)
     cell_size: float = Field(0.01, gt=0.0)
-    diffusion: float = Field(0.001, ge=0.0)
-    viscosity: float = Field(0.0, ge=0.0)
-    boundary_type: int = Field(1, ge=0, le=2)
+    diffusion: float = Field(0.01, ge=0.0)
+    viscosity: float = Field(0.01, ge=0.0)
+    boundary_type: int = Field(2, ge=0, le=2)
     inflow_velocity: float = Field(2.0, ge=0.0)
     stream_fps: float = Field(30.0, ge=0.0)
     stream_every: int = Field(1, ge=1)
     angle_of_attack: float | None = Field(None, description="Degrees")
-    cst_upper: List[float] | None = Field(
-        None, description="CST upper surface weights"
-    )
-    cst_lower: List[float] | None = Field(
-        None, description="CST lower surface weights"
-    )
+    cst_upper: List[float] | None = Field(None, description="CST upper surface weights")
+    cst_lower: List[float] | None = Field(None, description="CST lower surface weights")
     airfoil_offset_x: float | None = Field(
         None, description="Leading edge x position in meters"
     )
     airfoil_offset_y: float | None = Field(
         None, description="Centerline y position in meters"
     )
-    chord_length: float | None = Field(
-        None, description="Chord length in meters"
-    )
+    chord_length: float | None = Field(None, description="Chord length in meters")
     num_cst_points: int = Field(100, ge=10)
     mask_sharpness: float = Field(50.0, gt=0.0)
 
@@ -94,39 +87,53 @@ def _get_fidelity(fidelity: str) -> Tuple[int, int]:
     return FIDELITY_MAP[fidelity_key]
 
 
-def _extract_cell_fields(state):
+def _compute_curl(u, v, cell_size):
+    # Centered difference curl calculation
+    height, width = u.shape[0], v.shape[1]
+    curl = jnp.zeros((height, width))
+
+    # v terms (dv/dx)
+    curl = curl.at[:, 1:].add((v[:-1, :-1] + v[1:, :-1]) / 2)
+    curl = curl.at[:, :-1].add(-(v[:-1, 1:] + v[1:, 1:]) / 2)
+
+    # u terms (du/dy)
+    curl = curl.at[1:, :].add(-(u[:-1, :-1] + u[:-1, 1:]) / 2)
+    curl = curl.at[:-1, :].add((u[1:, :-1] + u[1:, 1:]) / 2)
+
+    return curl / cell_size
+
+
+def _extract_cell_fields(state, cell_size):
     u = state.velocity.u
     v = state.velocity.v
     u_center = 0.5 * (u[:, :-1] + u[:, 1:])
     v_center = 0.5 * (v[:-1, :] + v[1:, :])
-    return u_center, v_center, state.pressure.values, state.solid_mask
+    curl = _compute_curl(u, v, cell_size)
+    return u_center, v_center, curl, state.pressure.values, state.solid_mask
 
 
-@app.get("/health")
+@router.get("/health")
 def health_check():
     return {"status": "ok"}
 
 
-@app.post("/sessions")
+@router.post("/sessions")
 def create_session(request: SessionRequest):
     try:
         height, width = _get_fidelity(request.fidelity)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    has_upper = request.cst_upper is not None
-    has_lower = request.cst_lower is not None
-    if has_upper != has_lower:
+    # Note: We now allow cst_upper/lower to be None, implying they will be sent via WS.
+    if (request.cst_upper is None) != (request.cst_lower is None):
         raise HTTPException(
             status_code=400,
-            detail="Both cst_upper and cst_lower must be provided together.",
+            detail="Both cst_upper and cst_lower must be provided together, or both be null.",
         )
 
-    domain_width = width * request.cell_size
-    domain_height = height * request.cell_size
-    chord_length = request.chord_length or (0.25 * domain_width)
-    airfoil_offset_x = request.airfoil_offset_x or (0.2 * domain_width)
-    airfoil_offset_y = request.airfoil_offset_y or (0.5 * domain_height)
+    chord_length = request.chord_length or (40 * request.cell_size)
+    airfoil_offset_x = request.airfoil_offset_x or (30 * request.cell_size)
+    airfoil_offset_y = request.airfoil_offset_y or (height // 2 * request.cell_size)
 
     session_id = str(next(_SESSION_ID))
     config = SessionConfig(
@@ -155,7 +162,7 @@ def create_session(request: SessionRequest):
     return {"session_id": session_id, "config": asdict(config)}
 
 
-@app.websocket("/ws/{session_id}")
+@router.websocket("/ws/{session_id}")
 async def stream_state(ws: WebSocket, session_id: str):
     config = _SESSIONS.get(session_id)
     if config is None:
@@ -166,6 +173,14 @@ async def stream_state(ws: WebSocket, session_id: str):
 
     await ws.accept()
 
+    if config.cst_upper is None or config.cst_lower is None:
+        await ws.send_json({"error": "Missing weights in session config"})
+        await ws.close(code=1003)
+        return
+    else:
+        cst_upper = config.cst_upper
+        cst_lower = config.cst_lower
+
     grid = FluidGrid(
         height=config.height,
         width=config.width,
@@ -175,40 +190,57 @@ async def stream_state(ws: WebSocket, session_id: str):
         viscosity=config.viscosity,
         boundary_type=config.boundary_type,
         visualise=False,
+        sdf=None,  # We inject mask manually
     )
+
     grid.is_wind_tunnel = True
     grid.inlet_velocity = config.inflow_velocity
     angle_deg = config.angle_of_attack or 0.0
     grid.inlet_angle_rad = float(jnp.deg2rad(angle_deg))
-    grid.solid_mask = grid.solid_mask.at[1:-1, -1].set(False)
 
     state = grid.create_initial_state()
 
-    if config.cst_upper is not None and config.cst_lower is not None:
-        grid_x, grid_y = compute_grid_coordinates(
-            config.height, config.width, config.cell_size
-        )
-        airfoil_mask = create_airfoil_solid_mask(
-            jnp.asarray(config.cst_upper),
-            jnp.asarray(config.cst_lower),
-            grid_x,
-            grid_y,
-            config.airfoil_offset_x,
-            config.airfoil_offset_y,
-            config.chord_length,
-            num_cst_points=config.num_cst_points,
-            sharpness=config.mask_sharpness,
-        )
-        combined_mask = jnp.maximum(state.solid_mask.astype(jnp.float32), airfoil_mask)
-        state = state.__class__(
-            density=state.density,
-            velocity=state.velocity,
-            pressure=state.pressure,
-            solid_mask=combined_mask,
-            sources=state.sources,
-            time=state.time,
-            step=state.step,
-        )
+    grid_x, grid_y = compute_grid_coordinates(
+        config.height, config.width, config.cell_size
+    )
+
+    airfoil_mask = create_airfoil_solid_mask(
+        jnp.asarray(cst_upper),
+        jnp.asarray(cst_lower),
+        grid_x,
+        grid_y,
+        config.airfoil_offset_x,
+        config.airfoil_offset_y,
+        config.chord_length,
+        num_cst_points=config.num_cst_points,
+        sharpness=config.mask_sharpness,
+    )
+
+    # Threshold fix for soft mask
+    airfoil_mask = jnp.where(airfoil_mask < 0.05, 0.0, airfoil_mask)
+
+    # Combine with boundary
+    combined_mask = jnp.maximum(grid.solid_mask, airfoil_mask)
+    grid.solid_mask = combined_mask
+
+    state = state.__class__(
+        density=state.density,
+        velocity=state.velocity,
+        pressure=state.pressure,
+        solid_mask=combined_mask,
+        sources=state.sources,
+        time=state.time,
+        step=state.step,
+    )
+
+    state = grid.set_velocity_field(state, field_type="wind tunnel")
+
+    # Add smoke sources (same visualization as validation_server_cst.py)
+    source_positions = []
+    for i in range(config.height):
+        if i % 8 < 4:
+            source_positions.append((i, 5, 2.0))
+    state = grid.set_sources(state, source_positions)
 
     max_steps = int(config.sim_time / config.dt) if config.sim_time > 0 else -1
     step = 0
@@ -218,7 +250,9 @@ async def stream_state(ws: WebSocket, session_id: str):
             state = grid.step(state)
 
             if step % config.stream_every == 0:
-                u_center, v_center, pressure, solid = _extract_cell_fields(state)
+                u_center, v_center, curl, pressure, solid = _extract_cell_fields(
+                    state, config.cell_size
+                )
                 payload = {
                     "meta": {
                         "session_id": config.session_id,
@@ -231,6 +265,7 @@ async def stream_state(ws: WebSocket, session_id: str):
                     "fields": {
                         "u": jnp.asarray(u_center).tolist(),
                         "v": jnp.asarray(v_center).tolist(),
+                        "curl": jnp.asarray(curl).tolist(),
                         "pressure": jnp.asarray(pressure).tolist(),
                         "solid": jnp.asarray(solid).astype(int).tolist(),
                     },
