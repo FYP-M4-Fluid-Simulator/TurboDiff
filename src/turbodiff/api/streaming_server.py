@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from turbodiff.core.airfoil_optimization import (
     compute_grid_coordinates,
     create_airfoil_solid_mask,
+    compute_force_coefficients,
 )
 from turbodiff.core.fluid_grid_jax import FluidGrid
 
@@ -250,6 +251,17 @@ async def stream_state(ws: WebSocket, session_id: str):
             state = grid.step(state)
 
             if step % config.stream_every == 0:
+                # Calculate aerodynamic coefficients
+                cl, cd = compute_force_coefficients(
+                    state,
+                    airfoil_mask,
+                    inflow_velocity=config.inflow_velocity,
+                    chord_length=config.chord_length,
+                )
+
+                # Avoid division by zero for L/D
+                l_d = cl / cd if abs(cd) > 1e-9 else 0.0
+
                 u_center, v_center, curl, pressure, solid = _extract_cell_fields(
                     state, config.cell_size
                 )
@@ -261,6 +273,9 @@ async def stream_state(ws: WebSocket, session_id: str):
                         "cell_size": float(config.cell_size),
                         "time": float(state.time),
                         "step": int(state.step),
+                        "cl": float(cl),
+                        "cd": float(cd),
+                        "l_d": float(l_d),
                     },
                     "fields": {
                         "u": jnp.asarray(u_center).tolist(),

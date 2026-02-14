@@ -67,6 +67,13 @@ async def run_client():
                     print(f"Server error: {payload['error']}")
                     break
 
+                step = payload["meta"]["step"]
+                cl = payload["meta"].get("cl", 0.0)
+                cd = payload["meta"].get("cd", 0.0)
+                l_d = payload["meta"].get("l_d", 0.0)
+
+                print(f"Step {step}: CL={cl:.4f}, CD={cd:.4f}, L/D={l_d:.2f}")
+
                 fields = payload.get("fields", {})
 
                 u = np.array(fields["u"])
