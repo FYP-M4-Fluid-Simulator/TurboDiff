@@ -246,9 +246,25 @@ async def stream_state(ws: WebSocket, session_id: str):
     max_steps = int(config.sim_time / config.dt) if config.sim_time > 0 else -1
     step = 0
 
+    print(f"   Starting simulation for session {config.session_id}")
+    print(f"   sim_time={config.sim_time}s, dt={config.dt}s, max_steps={max_steps}")
+
     try:
-        while max_steps < 0 or step < max_steps:
+        while True:
+            # Log every 100 steps
+            if step % 100 == 0:
+                print(f"   Progress: step={step}/{max_steps}")
+
+            # Check if we should stop
+            if max_steps > 0 and step >= max_steps:
+                print(
+                    f"   Simulation complete: reached {step} steps (max: {max_steps})"
+                )
+                print("   Breaking out of loop...")
+                break
+
             state = grid.step(state)
+            step += 1
 
             if step % config.stream_every == 0:
                 # Calculate aerodynamic coefficients
@@ -287,12 +303,15 @@ async def stream_state(ws: WebSocket, session_id: str):
                 }
                 await ws.send_json(payload)
 
-            step += 1
-
             if config.stream_fps > 0:
                 await asyncio.sleep(1.0 / config.stream_fps)
             else:
                 await asyncio.sleep(0)
 
+        # Simulation completed, close the connection
+        print(f"Closing WebSocket for session {config.session_id}")
+        await ws.close()
+
     except WebSocketDisconnect:
+        print(f"WebSocket disconnected for session {config.session_id}")
         return
