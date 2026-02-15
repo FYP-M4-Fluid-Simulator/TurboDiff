@@ -136,6 +136,7 @@ def create_solid_mask(
 
     return solid_mask
 
+
 def create_u_face_mask(
     resolution: tuple[int, int], boundary: int = 1, sdf_fn=None, smoothing=0.1
 ) -> Array:
@@ -165,15 +166,18 @@ def create_u_face_mask(
     if sdf_fn is not None:
         # Create coordinate grids
         i_grid, j_grid = jnp.meshgrid(
-            jnp.arange(height), jnp.arange(width+1), indexing="ij"
+            jnp.arange(height), jnp.arange(width + 1), indexing="ij"
         )
         j_grid = j_grid - 0.5  # Shift to face centers
-        
+
         # Evaluate SDF and mark solid where SDF < 0
         sdf_values = sdf_fn(i_grid, j_grid)
-        u_face_mask = jnp.maximum(u_face_mask, 1 - jax.nn.sigmoid(sdf_values / smoothing))
+        u_face_mask = jnp.maximum(
+            u_face_mask, 1 - jax.nn.sigmoid(sdf_values / smoothing)
+        )
 
     return u_face_mask
+
 
 def create_v_face_mask(
     resolution: tuple[int, int], boundary: int = 1, sdf_fn=None, smoothing=0.1
@@ -204,22 +208,20 @@ def create_v_face_mask(
     if sdf_fn is not None:
         # Create coordinate grids
         i_grid, j_grid = jnp.meshgrid(
-            jnp.arange(height+1), jnp.arange(width), indexing="ij"
+            jnp.arange(height + 1), jnp.arange(width), indexing="ij"
         )
         i_grid = i_grid - 0.5  # Shift to face centers
 
         # Evaluate SDF and mark solid where SDF < 0
         sdf_values = sdf_fn(i_grid, j_grid)
-        v_face_mask = jnp.maximum(v_face_mask, 1 - jax.nn.sigmoid(sdf_values / smoothing))
+        v_face_mask = jnp.maximum(
+            v_face_mask, 1 - jax.nn.sigmoid(sdf_values / smoothing)
+        )
     return v_face_mask
 
-import jax.numpy as jnp
 
 def create_solid_border(
-    window_size: tuple[int, int],
-    cell_size: float,
-    sdf_fn=None,
-    thickness=0.2
+    window_size: tuple[int, int], cell_size: float, sdf_fn=None, thickness=0.2
 ) -> list[tuple[int, int]]:
     """
     Create a list of solid border cell indices based on a signed distance function.
@@ -254,16 +256,14 @@ def create_solid_border(
     sdf_values = sdf_fn(i_grid, j_grid)
 
     # Identify points where sign changes (left to right)
-    sdf_values_sign_left = jax.nn.sigmoid(sdf_values[:,:-1]) > 0.5 - thickness
-    sdf_values_sign_right = jax.nn.sigmoid(sdf_values[:,1:]) > 0.5 + thickness
+    sdf_values_sign_left = jax.nn.sigmoid(sdf_values[:, :-1]) > 0.5 - thickness
+    sdf_values_sign_right = jax.nn.sigmoid(sdf_values[:, 1:]) > 0.5 + thickness
     border = jnp.logical_xor(sdf_values_sign_left, sdf_values_sign_right)
-    
+
     # Identify border cells
     indices = jnp.argwhere(border)
 
     return [tuple(idx) for idx in indices.tolist()]
-
-
 
 
 @jax.jit

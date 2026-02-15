@@ -132,7 +132,9 @@ class FluidGrid:
             self.screen = pygame.display.set_mode(
                 (self.width * self.display_size, self.height * self.display_size)
             )
-            self.solid_border = create_solid_border(pygame.display.get_window_size()[::-1], self.display_size, sdf)
+            self.solid_border = create_solid_border(
+                pygame.display.get_window_size()[::-1], self.display_size, sdf
+            )
             self.clock = pygame.time.Clock()
 
     def create_initial_state(
@@ -492,7 +494,7 @@ class FluidGrid:
     def solve_pressure(self, state: FluidState, num_iters: int = 30) -> FluidState:
         """
         Solve for pressure using Gauss-Seidel iterations.
-        
+
         Handles partial masking where solid_mask values between 0 and 1
         represent fractional solid coverage for sub-grid resolution obstacles.
 
@@ -579,7 +581,7 @@ class FluidGrid:
     def project_velocity(self, state: FluidState) -> FluidState:
         """
         Make velocity field divergence-free by subtracting pressure gradient.
-        
+
         Handles partial masking by scaling pressure gradients by the average
         fluid fraction at face boundaries.
 
@@ -608,7 +610,9 @@ class FluidGrid:
         # Use average fluid fraction at the face
         fluid_at_u_face = (fluid_left + fluid_right) / 2.0
         # Zero out gradient where face is mostly solid (avg fluid fraction < 0.001)
-        grad_u_masked = jnp.where(fluid_at_u_face > 0.001, grad_u * fluid_at_u_face, 0.0)
+        grad_u_masked = jnp.where(
+            fluid_at_u_face > 0.001, grad_u * fluid_at_u_face, 0.0
+        )
 
         new_u = u.at[:, 1:-1].add(grad_u_masked)
 
@@ -624,7 +628,9 @@ class FluidGrid:
         # Use average fluid fraction at the face
         fluid_at_v_face = (fluid_up + fluid_down) / 2.0
         # Zero out gradient where face is mostly solid (avg fluid fraction < 0.001)
-        grad_v_masked = jnp.where(fluid_at_v_face > 0.001, grad_v * fluid_at_v_face, 0.0)
+        grad_v_masked = jnp.where(
+            fluid_at_v_face > 0.001, grad_v * fluid_at_v_face, 0.0
+        )
 
         new_v = v.at[1:-1, :].add(grad_v_masked)
 
@@ -1162,7 +1168,7 @@ class FluidGrid:
                             True,
                             [(x, end_y), (left_x, left_y), (right_x, right_y)],
                         )
-        
+
         # Draw shape border
         for i, j in self.solid_border:
             x = j * 1
