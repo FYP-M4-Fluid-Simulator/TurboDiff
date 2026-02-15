@@ -23,6 +23,7 @@ dependencies = [
   "pygame>=2.5",
   "fastapi>=0.110",
   "uvicorn>=0.27",
+  "python-multipart"
 ]
 
 [project.optional-dependencies]
