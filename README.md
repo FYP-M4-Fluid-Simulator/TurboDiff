@@ -38,7 +38,7 @@ A differentiable fluid simulation pipeline for Wind Turbine Shape Optimization
 Run the WebSocket streaming server:
 
 ```bash
-uvicorn turbodiff.api.streaming_server:app --reload
+uvicorn turbodiff.api.app:app --reload
 ```
 
 Create a session with a POST request (frontend defines conditions and shape):
