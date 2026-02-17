@@ -4,6 +4,8 @@ import pygame
 import websockets
 import numpy as np
 import requests
+from turbodiff.core.airfoil import generate_cst_coords
+import jax.numpy as jnp
 
 
 SERVER_URL = "http://localhost:8001"
@@ -15,6 +17,18 @@ DISPLAY_SIZE = 1000 // max(HEIGHT, WIDTH)
 
 SHOW_VELOCITY = True
 SHOW_CELL_PROPERTY = "curl"
+
+# Simulation parameters (must match server defaults)
+CELL_SIZE = 0.01  # meters
+CHORD_LENGTH = 40 * CELL_SIZE  # 0.4 meters (server default)
+
+# CST coefficients
+cst_upper = [0.18, 0.22, 0.20, 0.18, 0.15, 0.12]
+cst_lower = [-0.10, -0.08, -0.06, -0.05, -0.04, -0.03]
+
+# Airfoil offsets in meters (world coordinates, matching server defaults)
+airfoil_offset_x = 30 * CELL_SIZE  # 0.3 meters (30 cells from left edge)
+airfoil_offset_y = (HEIGHT // 2) * CELL_SIZE  # 0.64 meters (vertically centered)
 
 
 async def run_client():
@@ -30,17 +44,12 @@ async def run_client():
             json={
                 "fidelity": "medium",
                 "sim_time": 10,  # Infinite
-                "cst_upper": [0.18, 0.22, 0.20, 0.18, 0.15, 0.12],  # Default RAE2822
-                "cst_lower": [
-                    -0.10,
-                    -0.08,
-                    -0.06,
-                    -0.05,
-                    -0.04,
-                    -0.03,
-                ],  # Default RAE2822
+                "cst_upper": cst_upper,  # Default RAE2822
+                "cst_lower": cst_lower,  # Default RAE2822
                 "stream_every": 1,
                 "stream_fps": 30.0,
+                "airfoil_offset_x": airfoil_offset_x,
+                "airfoil_offset_y": airfoil_offset_y,
             },
         )
         response.raise_for_status()
@@ -55,7 +64,8 @@ async def run_client():
     uri = f"{WS_URL}/ws/{session_id}"
     print(f"Connecting to {uri}...")
 
-    try:
+    # try:
+    if True:
         async with websockets.connect(uri, max_size=None) as websocket:
             print("Connected! Waiting for stream...")
 
@@ -139,16 +149,63 @@ async def run_client():
                                 screen, color, (start_x, start_y), (end_x, end_y)
                             )
 
+                # Draw CST airfoil outline with white border
+                # Generate airfoil coordinates in normalized space [0, 1]
+                x, y_upper, y_lower = generate_cst_coords(
+                    jnp.array(cst_upper),
+                    jnp.array(cst_lower),
+                    num_points=200,
+                    cosine_spacing=True,
+                )
+
+                # Convert to numpy arrays
+                x = np.array(x)
+                y_upper = np.array(y_upper)
+                y_lower = np.array(y_lower)
+
+                # Convert from normalized airfoil coordinates [0,1] to world coordinates (meters)
+                # x ranges from offset_x to offset_x + chord_length
+                # y ranges from offset_y + y_surface (where y_surface is scaled by chord)
+                world_x = airfoil_offset_x + x * CHORD_LENGTH
+                world_y_upper = airfoil_offset_y + y_upper * CHORD_LENGTH
+                world_y_lower = airfoil_offset_y + y_lower * CHORD_LENGTH
+
+                # Convert from world coordinates (meters) to grid coordinates (cell indices)
+                grid_x = world_x / CELL_SIZE
+                grid_y_upper = world_y_upper / CELL_SIZE
+                grid_y_lower = world_y_lower / CELL_SIZE
+
+                # Convert from grid coordinates to screen coordinates (pixels)
+                screen_x = grid_x * DISPLAY_SIZE
+                screen_y_upper = grid_y_upper * DISPLAY_SIZE
+                screen_y_lower = grid_y_lower * DISPLAY_SIZE
+
+                # Create point lists for upper and lower surfaces
+                upper_points = [
+                    (float(screen_x[i]), float(screen_y_upper[i]))
+                    for i in range(len(x))
+                ]
+                lower_points = [
+                    (float(screen_x[i]), float(screen_y_lower[i]))
+                    for i in range(len(x))
+                ]
+
+                # Draw the airfoil outline with white border (thickness=2)
+                if len(upper_points) > 1:
+                    pygame.draw.lines(screen, (255, 255, 255), False, upper_points, 2)
+                if len(lower_points) > 1:
+                    pygame.draw.lines(screen, (255, 255, 255), False, lower_points, 2)
+
                 pygame.display.flip()
 
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         return
 
-    except Exception as e:
-        print(f"Connection error: {e}")
-    finally:
-        pygame.quit()
+    # except Exception as e:
+    #     print(f"Connection error: {e}")
+    # finally:
+    #     pygame.quit()
 
 
 if __name__ == "__main__":

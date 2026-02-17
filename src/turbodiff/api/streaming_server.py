@@ -53,7 +53,7 @@ class SessionRequest(BaseModel):
     )
     chord_length: float | None = Field(None, description="Chord length in meters")
     num_cst_points: int = Field(100, ge=10)
-    mask_sharpness: float = Field(50.0, gt=0.0)
+    mask_sharpness: float = Field(500.0, gt=0.0)
 
 
 @dataclass(frozen=True)
