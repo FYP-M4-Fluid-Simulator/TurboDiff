@@ -396,6 +396,8 @@ async def stream_optimization(ws: WebSocket, session_id: str):
                 "final_cd": float(C_D),
                 "final_cl_cd": cl_cd,
                 "final_drag": float(drag_force),
+                "final_loss": float(loss_val),
+                "final_geo_loss": float(geo_loss),
             },
             "shape": {
                 "cst_upper": final_upper.tolist(),
