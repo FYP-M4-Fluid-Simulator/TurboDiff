@@ -8,8 +8,8 @@ from turbodiff.core.airfoil import generate_cst_coords
 import jax.numpy as jnp
 
 
-SERVER_URL = "http://localhost:8001"
-WS_URL = "ws://localhost:8001"
+SERVER_URL = "http://localhost:8000"
+WS_URL = "ws://localhost:8000"
 
 HEIGHT = 128  # Matches 'medium' fidelity
 WIDTH = 256
