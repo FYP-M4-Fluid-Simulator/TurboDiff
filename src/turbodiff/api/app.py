@@ -5,7 +5,14 @@ from typing import Dict, Tuple
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from turbodiff.api import validation_server, validation_server_cst, streaming_server, cst_routes, optimization_server
+from turbodiff.api import (
+    validation_server,
+    validation_server_cst,
+    streaming_server,
+    cst_routes,
+    optimization_server,
+)
+from turbodiff.db.storage import configure_storage_from_env
 
 FIDELITY_MAP: Dict[str, Tuple[int, int]] = {
     "low": (64, 128),
@@ -14,6 +21,12 @@ FIDELITY_MAP: Dict[str, Tuple[int, int]] = {
 }
 
 app = FastAPI(title="TurboDiff Streaming API")
+
+
+@app.on_event("startup")
+def configure_storage() -> None:
+    configure_storage_from_env()
+
 
 app.add_middleware(
     CORSMiddleware,

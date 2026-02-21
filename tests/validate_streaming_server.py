@@ -42,6 +42,7 @@ async def run_client():
         response = requests.post(
             f"{SERVER_URL}/sessions",
             json={
+                "user_id": "demo-user",
                 "fidelity": "medium",
                 "sim_time": 10,  # Infinite
                 "cst_upper": cst_upper,  # Default RAE2822

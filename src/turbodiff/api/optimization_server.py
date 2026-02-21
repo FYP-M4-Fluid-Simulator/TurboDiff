@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, dataclass
-from itertools import count
 from typing import Dict, List, Tuple
+from uuid import uuid4
 
 import jax
 import jax.numpy as jnp
@@ -26,7 +26,12 @@ from turbodiff.core.loss_functions import (
     thickness_constraint_loss,
 )
 from turbodiff.core.optimization import create_optimizer
-from turbodiff.core.fluid_grid_jax import FluidGrid, FluidState
+from turbodiff.core.fluid_grid_jax import FluidGrid
+from turbodiff.db.storage import (
+    OptimizedAirfoilPayload,
+    SessionCreatePayload,
+    get_storage_repository,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -40,7 +45,6 @@ FIDELITY_MAP: Dict[str, Tuple[int, int]] = {
 
 router = APIRouter(prefix="/optimize", tags=["optimization"])
 
-_OPT_SESSION_ID = count(1)
 _OPT_SESSIONS: Dict[str, "OptSessionConfig"] = {}
 
 
@@ -48,8 +52,11 @@ _OPT_SESSIONS: Dict[str, "OptSessionConfig"] = {}
 # Request / config models
 # ---------------------------------------------------------------------------
 
+
 class OptSessionRequest(BaseModel):
     """Parameters to create an optimization session."""
+
+    user_id: str = Field(..., description="User identifier")
 
     fidelity: str = Field("low", description="low | medium | coarse")
 
@@ -71,7 +78,9 @@ class OptSessionRequest(BaseModel):
     num_sim_steps: int = Field(80, ge=1, description="Sim steps per iteration")
 
     # Airfoil placement
-    chord_length: float | None = Field(None, description="Chord length (cells × cell_size)")
+    chord_length: float | None = Field(
+        None, description="Chord length (cells × cell_size)"
+    )
     airfoil_offset_x: float | None = Field(None)
     airfoil_offset_y: float | None = Field(None)
 
@@ -101,6 +110,7 @@ class OptSessionRequest(BaseModel):
 @dataclass(frozen=True)
 class OptSessionConfig:
     session_id: str
+    user_id: str
     height: int
     width: int
     cst_upper: List[float]
@@ -131,6 +141,7 @@ class OptSessionConfig:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _get_fidelity(fidelity: str) -> Tuple[int, int]:
     key = fidelity.lower()
     if key not in FIDELITY_MAP:
@@ -142,6 +153,7 @@ def _get_fidelity(fidelity: str) -> Tuple[int, int]:
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
 
 @router.post("/sessions")
 def create_opt_session(request: OptSessionRequest):
@@ -156,9 +168,10 @@ def create_opt_session(request: OptSessionRequest):
     airfoil_offset_x = request.airfoil_offset_x or 2.0
     airfoil_offset_y = request.airfoil_offset_y or (height * request.cell_size / 2)
 
-    session_id = str(next(_OPT_SESSION_ID))
+    session_id = str(uuid4())
     config = OptSessionConfig(
         session_id=session_id,
+        user_id=request.user_id,
         height=height,
         width=width,
         cst_upper=request.cst_upper,
@@ -185,7 +198,83 @@ def create_opt_session(request: OptSessionRequest):
         stream_fps=request.stream_fps,
     )
     _OPT_SESSIONS[session_id] = config
-    return {"session_id": session_id, "config": asdict(config)}
+
+    repo = get_storage_repository()
+    parameters = {
+        "request": request.dict(),
+        "resolved": {
+            "height": height,
+            "width": width,
+            "chord_length": chord_length,
+            "airfoil_offset_x": airfoil_offset_x,
+            "airfoil_offset_y": airfoil_offset_y,
+        },
+    }
+    try:
+        storage = repo.create_session_with_airfoil(
+            SessionCreatePayload(
+                session_id=session_id,
+                user_id=request.user_id,
+                session_type="optimize",
+                parameters=parameters,
+                cst_weights_upper=request.cst_upper,
+                cst_weights_lower=request.cst_lower,
+                chord_length=chord_length,
+                angle_of_attack=None,
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "session_id": session_id,
+        "config": asdict(config),
+        "storage": {
+            "airfoil_id": storage.airfoil_id,
+            "cst_id": storage.cst_id,
+        },
+    }
+
+
+class OptimizationSaveRequest(BaseModel):
+    user_id: str = Field(..., description="User identifier")
+    cst_upper: List[float]
+    cst_lower: List[float]
+    chord_length: float | None = None
+    angle_of_attack: float | None = None
+    cl: float | None = None
+    cd: float | None = None
+    lift: float | None = None
+    drag: float | None = None
+
+
+@router.post("/sessions/{session_id}/save")
+def save_optimized_airfoil(session_id: str, request: OptimizationSaveRequest):
+    config = _OPT_SESSIONS.get(session_id)
+    if config is None:
+        raise HTTPException(status_code=404, detail="unknown session_id")
+
+    chord_length = request.chord_length or config.chord_length
+    repo = get_storage_repository()
+    try:
+        airfoil = repo.save_optimized_airfoil(
+            OptimizedAirfoilPayload(
+                session_id=session_id,
+                user_id=request.user_id,
+                cst_weights_upper=request.cst_upper,
+                cst_weights_lower=request.cst_lower,
+                chord_length=chord_length,
+                angle_of_attack=request.angle_of_attack,
+                cl=request.cl,
+                cd=request.cd,
+                lift=request.lift,
+                drag=request.drag,
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {"airfoil_id": airfoil.id}
 
 
 def _build_optimization_fns(config: OptSessionConfig):
@@ -217,7 +306,9 @@ def _build_optimization_fns(config: OptSessionConfig):
         # Geometric constraints (mirrors optimize_airfoil.py exactly)
         x_cst, y_upper, y_lower = generate_cst_coords(weights_upper, weights_lower)
         thickness = thickness_at_x(y_upper, y_lower)
-        geo_loss = crossover_validity_loss(y_upper, y_lower) + thickness_constraint_loss(
+        geo_loss = crossover_validity_loss(
+            y_upper, y_lower
+        ) + thickness_constraint_loss(
             thickness, config.min_thickness, config.max_thickness
         )
 
@@ -242,7 +333,7 @@ def _build_optimization_fns(config: OptSessionConfig):
         state = jax.lax.fori_loop(0, config.num_sim_steps, step_fn, state)
 
         pressure = state.pressure.values
-        cell_volume = config.cell_size ** 2
+        cell_volume = config.cell_size**2
 
         grad_mask_x = jnp.zeros_like(obstacle_mask)
         grad_mask_y = jnp.zeros_like(obstacle_mask)
@@ -256,7 +347,7 @@ def _build_optimization_fns(config: OptSessionConfig):
         drag_force = jnp.sum(pressure * grad_mask_x) * cell_volume
         lift_force = jnp.sum(pressure * grad_mask_y) * cell_volume
 
-        q = 0.5 * config.inflow_velocity ** 2
+        q = 0.5 * config.inflow_velocity**2
         C_D = drag_force / (q * config.chord_length)
         C_L = lift_force / (q * config.chord_length)
 
@@ -277,7 +368,9 @@ def _build_optimization_fns(config: OptSessionConfig):
 def _run_iteration(params, compute_loss_with_aux, grad_fn, config):
     """Run one optimization iteration (CPU-heavy, called in thread)."""
 
-    loss_val, (C_L, C_D, lift_force, drag_force, geo_loss) = compute_loss_with_aux(params)
+    loss_val, (C_L, C_D, lift_force, drag_force, geo_loss) = compute_loss_with_aux(
+        params
+    )
     gradients = grad_fn(params)
 
     # No gradient clipping (matches optimize_airfoil.py)
@@ -304,17 +397,21 @@ async def stream_optimization(ws: WebSocket, session_id: str):
     n_weights, compute_loss_with_aux, grad_fn = _build_optimization_fns(config)
 
     # Initial parameters
-    params = jnp.concatenate([
-        jnp.array(config.cst_upper),
-        jnp.array(config.cst_lower),
-    ])
+    params = jnp.concatenate(
+        [
+            jnp.array(config.cst_upper),
+            jnp.array(config.cst_lower),
+        ]
+    )
 
     # Optimizer
     opt_state, update_fn = create_optimizer(
         config.optimizer, learning_rate=config.learning_rate
     )
 
-    print(f"[optimize] Session {config.session_id}: starting {config.num_iterations} iterations")
+    print(
+        f"[optimize] Session {config.session_id}: starting {config.num_iterations} iterations"
+    )
 
     try:
         for iteration in range(config.num_iterations):
@@ -326,11 +423,13 @@ async def stream_optimization(ws: WebSocket, session_id: str):
             )
 
             if has_nan:
-                await ws.send_json({
-                    "type": "warning",
-                    "iteration": iteration + 1,
-                    "message": "NaN detected, skipping update",
-                })
+                await ws.send_json(
+                    {
+                        "type": "warning",
+                        "iteration": iteration + 1,
+                        "message": "NaN detected, skipping update",
+                    }
+                )
                 continue
 
             # --- extract current shape for FE ---
@@ -387,28 +486,30 @@ async def stream_optimization(ws: WebSocket, session_id: str):
             final_upper, final_lower, num_points=config.num_cst_points
         )
 
-        await ws.send_json({
-            "type": "complete",
-            "meta": {
-                "total_iterations": config.num_iterations,
-                "final_cl": float(C_L),
-                "final_cd": float(C_D),
-                "final_cl_cd": cl_cd,
-                "final_drag": float(drag_force),
-                "final_loss": float(loss_val),
-            },
-            "shape": {
-                "cst_upper": final_upper.tolist(),
-                "cst_lower": final_lower.tolist(),
-                "airfoil_x": x_final.tolist(),
-                "airfoil_y_upper": y_upper_final.tolist(),
-                "airfoil_y_lower": y_lower_final.tolist(),
-            },
-            "initial_shape": {
-                "cst_upper": config.cst_upper,
-                "cst_lower": config.cst_lower,
-            },
-        })
+        await ws.send_json(
+            {
+                "type": "complete",
+                "meta": {
+                    "total_iterations": config.num_iterations,
+                    "final_cl": float(C_L),
+                    "final_cd": float(C_D),
+                    "final_cl_cd": cl_cd,
+                    "final_drag": float(drag_force),
+                    "final_loss": float(loss_val),
+                },
+                "shape": {
+                    "cst_upper": final_upper.tolist(),
+                    "cst_lower": final_lower.tolist(),
+                    "airfoil_x": x_final.tolist(),
+                    "airfoil_y_upper": y_upper_final.tolist(),
+                    "airfoil_y_lower": y_lower_final.tolist(),
+                },
+                "initial_shape": {
+                    "cst_upper": config.cst_upper,
+                    "cst_lower": config.cst_lower,
+                },
+            }
+        )
 
         print(f"[optimize] Session {config.session_id}: optimization complete")
         await ws.close()

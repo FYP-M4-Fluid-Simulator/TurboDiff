@@ -1,7 +1,5 @@
 from lib.airfoil_generation import class_shape_transformation
 import numpy as np
-import math as mh
-import os
 
 from turbodiff.utils._evaluate_error import measure_closeness
 
@@ -26,7 +24,6 @@ def CST_fitting(input_path, output_path, Bernstein_order, _R_le):
     """
 
     fitting_airfoil = class_shape_transformation.CST(input_path, Bernstein_order)
-    output_file_name = os.path.basename(output_path)
 
     # _x, _y are the x , y values of the input airfoil
     # _x_id is the index of point to split the upper and lower surface (the starting point)
@@ -142,16 +139,11 @@ def CST_fitting(input_path, output_path, Bernstein_order, _R_le):
     # error_up = fitting_airfoil.error_eval(y_up, y_CST_up[:, 0])
     # error_low = fitting_airfoil.error_eval(y_low, y_CST_low[:, 0])
 
-
-
     # lower points are opposite
-    a_low = -a_low 
+    a_low = -a_low
     return {
         "upperCoefficients": a_up.tolist(),
         "lowerCoefficients": a_low.tolist(),
         "accuracy": accuracy,
         "message": "File converted successfully",
     }
-
-
-

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, dataclass
-from itertools import count
 from typing import Dict, List, Tuple
+from uuid import uuid4
 
 import jax.numpy as jnp
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
@@ -17,6 +17,11 @@ from turbodiff.core.airfoil_optimization import (
     compute_force_coefficients,
 )
 from turbodiff.core.fluid_grid_jax import FluidGrid
+from turbodiff.db.storage import (
+    SessionCreatePayload,
+    SimulationMetricsUpdate,
+    get_storage_repository,
+)
 
 
 FIDELITY_MAP: Dict[str, Tuple[int, int]] = {
@@ -26,12 +31,11 @@ FIDELITY_MAP: Dict[str, Tuple[int, int]] = {
 }
 
 router = APIRouter()
-
-_SESSION_ID = count(1)
 _SESSIONS: Dict[str, "SessionConfig"] = {}
 
 
 class SessionRequest(BaseModel):
+    user_id: str = Field(..., description="User identifier")
     fidelity: str = Field("medium", description="low | medium | coarse")
     sim_time: float = Field(0.0, ge=0.0, description="Seconds; 0 for infinite")
     dt: float = Field(0.01, gt=0.0)
@@ -59,6 +63,7 @@ class SessionRequest(BaseModel):
 @dataclass(frozen=True)
 class SessionConfig:
     session_id: str
+    user_id: str
     height: int
     width: int
     sim_time: float
@@ -125,7 +130,6 @@ def create_session(request: SessionRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # Note: We now allow cst_upper/lower to be None, implying they will be sent via WS.
     if (request.cst_upper is None) != (request.cst_lower is None):
         raise HTTPException(
             status_code=400,
@@ -136,9 +140,10 @@ def create_session(request: SessionRequest):
     airfoil_offset_x = request.airfoil_offset_x or (30 * request.cell_size)
     airfoil_offset_y = request.airfoil_offset_y or (height // 2 * request.cell_size)
 
-    session_id = str(next(_SESSION_ID))
+    session_id = str(uuid4())
     config = SessionConfig(
         session_id=session_id,
+        user_id=request.user_id,
         height=height,
         width=width,
         sim_time=request.sim_time,
@@ -160,7 +165,74 @@ def create_session(request: SessionRequest):
         mask_sharpness=request.mask_sharpness,
     )
     _SESSIONS[session_id] = config
-    return {"session_id": session_id, "config": asdict(config)}
+
+    repo = get_storage_repository()
+    parameters = {
+        "request": request.dict(),
+        "resolved": {
+            "height": height,
+            "width": width,
+            "chord_length": chord_length,
+            "airfoil_offset_x": airfoil_offset_x,
+            "airfoil_offset_y": airfoil_offset_y,
+        },
+    }
+    try:
+        storage = repo.create_session_with_airfoil(
+            SessionCreatePayload(
+                session_id=session_id,
+                user_id=request.user_id,
+                session_type="simulate",
+                parameters=parameters,
+                cst_weights_upper=request.cst_upper or [],
+                cst_weights_lower=request.cst_lower or [],
+                chord_length=chord_length,
+                angle_of_attack=request.angle_of_attack,
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "session_id": session_id,
+        "config": asdict(config),
+        "storage": {
+            "airfoil_id": storage.airfoil_id,
+            "cst_id": storage.cst_id,
+        },
+    }
+
+
+class SimulationSaveRequest(BaseModel):
+    user_id: str = Field(..., description="User identifier")
+    cl: float | None = None
+    cd: float | None = None
+    lift: float | None = None
+    drag: float | None = None
+    angle_of_attack: float | None = None
+
+
+@router.post("/sessions/{session_id}/save")
+def save_simulation_metrics(session_id: str, request: SimulationSaveRequest):
+    repo = get_storage_repository()
+    try:
+        airfoil = repo.update_simulation_metrics(
+            SimulationMetricsUpdate(
+                session_id=session_id,
+                user_id=request.user_id,
+                cl=request.cl,
+                cd=request.cd,
+                lift=request.lift,
+                drag=request.drag,
+                angle_of_attack=request.angle_of_attack,
+            )
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status = 404 if "no matching airfoil" in detail else 400
+        raise HTTPException(status_code=status, detail=detail) from exc
+
+    return {"airfoil_id": airfoil.id}
 
 
 @router.websocket("/ws/{session_id}")

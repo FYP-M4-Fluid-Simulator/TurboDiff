@@ -55,6 +55,7 @@ async def run_client():
         resp = requests.post(
             f"{SERVER_URL}/optimize/sessions",
             json={
+                "user_id": "demo-user",
                 "fidelity": "low",
                 "num_iterations": 30,
                 "learning_rate": 0.005,
@@ -71,13 +72,6 @@ async def run_client():
         print(f"Failed to create session: {e}")
         return
 
-    # Save initial shape for comparison
-    initial_upper = [0.18, 0.22, 0.20, 0.18, 0.15, 0.12]
-    initial_lower = [-0.10, -0.08, -0.06, -0.05, -0.04, -0.03]
-
-    # Pre-generate initial shape coords (normalized, 100 points)
-    t = np.linspace(0, np.pi, 100)
-    init_x = 0.5 * (1 - np.cos(t))  # cosine spacing
     # We'll receive the actual shape from the first iteration anyway
 
     uri = f"{WS_URL}/optimize/ws/{session_id}"
@@ -132,7 +126,6 @@ async def run_client():
             cd = meta["cd"]
             cl_cd = meta["cl_cd"]
             drag = meta["drag_force"]
-            lift = meta["lift_force"]
 
             loss_history.append(loss)
             cl_cd_history.append(cl_cd)
@@ -173,16 +166,22 @@ async def run_client():
             if "init_airfoil_x" in dir():
                 # Fill
                 init_pts_upper = [
-                    world_to_screen(init_airfoil_x[i], init_y_upper[i], x_range, y_range)
+                    world_to_screen(
+                        init_airfoil_x[i], init_y_upper[i], x_range, y_range
+                    )
                     for i in range(len(init_airfoil_x))
                 ]
                 init_pts_lower = [
-                    world_to_screen(init_airfoil_x[i], init_y_lower[i], x_range, y_range)
+                    world_to_screen(
+                        init_airfoil_x[i], init_y_lower[i], x_range, y_range
+                    )
                     for i in range(len(init_airfoil_x))
                 ]
                 init_polygon = init_pts_upper + init_pts_lower[::-1]
                 if len(init_polygon) > 2:
-                    init_surf = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA)
+                    init_surf = pygame.Surface(
+                        (WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA
+                    )
                     pygame.draw.polygon(init_surf, (180, 60, 60, 50), init_polygon)
                     screen.blit(init_surf, (0, 0))
                     pygame.draw.lines(screen, INITIAL_OUTLINE, False, init_pts_upper, 1)
@@ -199,7 +198,9 @@ async def run_client():
             ]
             cur_polygon = cur_pts_upper + cur_pts_lower[::-1]
             if len(cur_polygon) > 2:
-                cur_surf = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA)
+                cur_surf = pygame.Surface(
+                    (WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA
+                )
                 pygame.draw.polygon(cur_surf, (60, 180, 90, 60), cur_polygon)
                 screen.blit(cur_surf, (0, 0))
                 pygame.draw.lines(screen, CURRENT_OUTLINE, False, cur_pts_upper, 2)
@@ -208,7 +209,11 @@ async def run_client():
             # ---- Metrics panel (bottom) ----
             y_metrics = WINDOW_HEIGHT - 90
             pygame.draw.line(
-                screen, GRID_COLOR, (10, y_metrics - 5), (WINDOW_WIDTH - 10, y_metrics - 5), 1
+                screen,
+                GRID_COLOR,
+                (10, y_metrics - 5),
+                (WINDOW_WIDTH - 10, y_metrics - 5),
+                1,
             )
 
             # Title
@@ -233,10 +238,18 @@ async def run_client():
 
             # Legend
             legend_y = 10
-            pygame.draw.line(screen, INITIAL_OUTLINE, (15, legend_y + 7), (35, legend_y + 7), 2)
-            screen.blit(font_small.render("Initial", True, INITIAL_OUTLINE), (40, legend_y))
-            pygame.draw.line(screen, CURRENT_OUTLINE, (130, legend_y + 7), (150, legend_y + 7), 2)
-            screen.blit(font_small.render("Current", True, CURRENT_OUTLINE), (155, legend_y))
+            pygame.draw.line(
+                screen, INITIAL_OUTLINE, (15, legend_y + 7), (35, legend_y + 7), 2
+            )
+            screen.blit(
+                font_small.render("Initial", True, INITIAL_OUTLINE), (40, legend_y)
+            )
+            pygame.draw.line(
+                screen, CURRENT_OUTLINE, (130, legend_y + 7), (150, legend_y + 7), 2
+            )
+            screen.blit(
+                font_small.render("Current", True, CURRENT_OUTLINE), (155, legend_y)
+            )
 
             pygame.display.flip()
 
