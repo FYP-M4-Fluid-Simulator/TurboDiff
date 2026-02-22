@@ -1,6 +1,7 @@
 """all CST related endpoints"""
 
 from fastapi import APIRouter, Form, HTTPException, UploadFile, File
+from pydantic import BaseModel
 from turbodiff.utils.dat_to_cst import CST_fitting
 from turbodiff.db.storage import get_storage_repository
 import tempfile
@@ -19,7 +20,7 @@ def list_cst_for_user(user_id: str):
         "items": [
             {
                 "id": cst.id,
-                "name" : f"Airfoil {i}",
+                "name" : cst.name or f"Airfoil {i}",
                 "weights_upper": cst.weights_upper,
                 "weights_lower": cst.weights_lower,
                 "chord_length": cst.chord_length,
@@ -31,11 +32,31 @@ def list_cst_for_user(user_id: str):
                 "angle_of_attack": cst.angle_of_attack,
                 "created_by_user_id": cst.created_by_user_id,
                 "is_optimized": cst.is_optimized,
+                "is_saved": cst.is_saved,
                 "airfoil_created_at": cst.airfoil_created_at.isoformat(),
             }
             for i, cst in enumerate(csts)
         ]
     }
+
+class SaveExperimentRequest(BaseModel):
+    name: str
+    user_id: str
+    is_optimized: bool
+
+@router.post("/save_experiment/{session_id}")
+def save_experiment(session_id: str, request: SaveExperimentRequest):
+    repo = get_storage_repository()
+    try:
+        airfoil = repo.update_airfoil_save(
+            session_id=session_id,
+            is_optimized=request.is_optimized,
+            name=request.name,
+            user_id=request.user_id,
+        )
+        return {"status": "success", "airfoil_id": airfoil.id}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/get_cst_values")
