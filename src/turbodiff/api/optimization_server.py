@@ -103,6 +103,11 @@ class OptSessionRequest(BaseModel):
     num_cst_points: int = Field(100, ge=10)
     mask_sharpness: float = Field(50.0, gt=0.0)
 
+    # Angle of attack
+    angle_of_attack: float = Field(
+        0.0, description="Degrees; rotates airfoil, wind stays horizontal"
+    )
+
     # Streaming
     stream_fps: float = Field(0.0, ge=0.0, description="0 = as fast as possible")
 
@@ -134,6 +139,7 @@ class OptSessionConfig:
     w_ratio: float
     num_cst_points: int
     mask_sharpness: float
+    angle_of_attack: float
     stream_fps: float
 
 
@@ -195,6 +201,7 @@ def create_opt_session(request: OptSessionRequest):
         w_ratio=request.w_ratio,
         num_cst_points=request.num_cst_points,
         mask_sharpness=request.mask_sharpness,
+        angle_of_attack=request.angle_of_attack,
         stream_fps=request.stream_fps,
     )
     _OPT_SESSIONS[session_id] = config
@@ -220,7 +227,7 @@ def create_opt_session(request: OptSessionRequest):
                 cst_weights_upper=request.cst_upper,
                 cst_weights_lower=request.cst_lower,
                 chord_length=chord_length,
-                angle_of_attack=None,
+                angle_of_attack=request.angle_of_attack,
             )
         )
     except ValueError as exc:
@@ -286,12 +293,23 @@ def _build_optimization_fns(config: OptSessionConfig):
         config.height, config.width, config.cell_size
     )
 
+    # Rotate the airfoil by rotating the grid sample coords in the opposite
+    # direction around the airfoil's midpoint (same approach as streaming_server).
+    pivot_x = config.airfoil_offset_x + config.chord_length / 2.0
+    pivot_y = config.airfoil_offset_y
+    angle_rad = float(jnp.deg2rad(config.angle_of_attack))
+    cos_a, sin_a = jnp.cos(angle_rad), jnp.sin(angle_rad)
+    dx = grid_x - pivot_x
+    dy = grid_y - pivot_y
+    grid_x_rot = cos_a * dx + sin_a * dy + pivot_x
+    grid_y_rot = -sin_a * dx + cos_a * dy + pivot_y
+
     def _create_mask(weights_upper, weights_lower):
         return create_airfoil_solid_mask(
             weights_upper,
             weights_lower,
-            grid_x,
-            grid_y,
+            grid_x_rot,
+            grid_y_rot,
             config.airfoil_offset_x,
             config.airfoil_offset_y,
             config.chord_length,
