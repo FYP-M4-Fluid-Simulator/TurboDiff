@@ -37,10 +37,21 @@ from turbodiff.db.storage import (
 # ---------------------------------------------------------------------------
 # Fidelity presets (same as streaming_server)
 # ---------------------------------------------------------------------------
+# Keys match the values sent by the frontend after meshDensity → fidelity mapping.
 FIDELITY_MAP: Dict[str, Tuple[int, int]] = {
-    "low": (64, 128),
-    "medium": (128, 256),
-    "coarse": (256, 512),
+    "low": (64, 128),  # Coarse  (Fast)
+    "medium": (128, 256),  # Medium  (Balanced)
+    "high": (256, 512),  # Fine    (Detailed)
+    "ultra": (512, 1024),  # Ultra   (Precise)
+}
+
+# Default cell size (metres) for each fidelity level.
+# Keeps the airfoil chord at ≈ 40 cells regardless of resolution.
+CELL_SIZE_MAP: Dict[str, float] = {
+    "low": 0.04,
+    "medium": 0.02,
+    "high": 0.01,
+    "ultra": 0.005,
 }
 
 router = APIRouter(prefix="/optimize", tags=["optimization"])
@@ -58,7 +69,7 @@ class OptSessionRequest(BaseModel):
 
     user_id: str = Field(..., description="User identifier")
 
-    fidelity: str = Field("low", description="low | medium | coarse")
+    fidelity: str = Field("low", description="low | medium | high | ultra")
 
     # Initial CST weights
     cst_upper: List[float] = Field(
@@ -70,8 +81,13 @@ class OptSessionRequest(BaseModel):
         description="Initial lower-surface CST weights",
     )
 
-    # Simulation physics
-    cell_size: float = Field(0.1, gt=0.0)
+    # Simulation physics — cell_size defaults to None so the server can derive
+    # the appropriate value from the fidelity level automatically.
+    cell_size: float | None = Field(
+        None,
+        gt=0.0,
+        description="Cell size in metres; auto-derived from fidelity if omitted",
+    )
     dt: float = Field(0.05, gt=0.0)
     diffusion: float = Field(0.001, ge=0.0)
     inflow_velocity: float = Field(1.0, ge=0.0)
@@ -152,7 +168,7 @@ def _get_fidelity(fidelity: str) -> Tuple[int, int]:
     key = fidelity.lower()
     if key not in FIDELITY_MAP:
         opts = ", ".join(sorted(FIDELITY_MAP.keys()))
-        raise ValueError(f"Invalid fidelity={fidelity}. Options: {opts}")
+        raise ValueError(f"Invalid fidelity='{fidelity}'. Valid options: {opts}")
     return FIDELITY_MAP[key]
 
 
@@ -170,9 +186,20 @@ def create_opt_session(request: OptSessionRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    chord_length = request.chord_length or 3.0
-    airfoil_offset_x = request.airfoil_offset_x or 2.0
-    airfoil_offset_y = request.airfoil_offset_y or (height * request.cell_size / 2)
+    # Resolve cell_size: use the per-fidelity default when caller omits it,
+    # keeping airfoil at ≈ 40 cells of chord across all fidelity levels.
+    fidelity_key = request.fidelity.lower()
+    cell_size = (
+        request.cell_size
+        if request.cell_size is not None
+        else CELL_SIZE_MAP[fidelity_key]
+    )
+
+    # Default chord length: 1.0 m (within 0.5–2 m range).
+    # Users can override via request.chord_length.
+    chord_length = request.chord_length or 1.0
+    airfoil_offset_x = request.airfoil_offset_x or (30 * cell_size)
+    airfoil_offset_y = request.airfoil_offset_y or (height // 2 * cell_size)
 
     session_id = str(uuid4())
     config = OptSessionConfig(
@@ -182,7 +209,7 @@ def create_opt_session(request: OptSessionRequest):
         width=width,
         cst_upper=request.cst_upper,
         cst_lower=request.cst_lower,
-        cell_size=request.cell_size,
+        cell_size=cell_size,
         dt=request.dt,
         diffusion=request.diffusion,
         inflow_velocity=request.inflow_velocity,
@@ -212,6 +239,7 @@ def create_opt_session(request: OptSessionRequest):
         "resolved": {
             "height": height,
             "width": width,
+            "cell_size": cell_size,
             "chord_length": chord_length,
             "airfoil_offset_x": airfoil_offset_x,
             "airfoil_offset_y": airfoil_offset_y,
