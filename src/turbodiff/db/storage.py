@@ -82,6 +82,8 @@ class CstWithAirfoilRecord:
     angle_of_attack: Optional[float]
     created_by_user_id: str
     is_optimized: bool
+    is_saved: bool
+    name: Optional[str]
     airfoil_created_at: datetime
 
 
@@ -97,6 +99,8 @@ class AirfoilRecord:
     drag: Optional[float]
     angle_of_attack: Optional[float]
     created_by_user_id: str
+    is_saved: bool
+    name: Optional[str]
     created_at: datetime
 
 
@@ -119,6 +123,9 @@ class StorageRepository:
         raise NotImplementedError
 
     def save_optimized_airfoil(self, payload: OptimizedAirfoilPayload) -> AirfoilRecord:
+        raise NotImplementedError
+
+    def update_airfoil_save(self, session_id: str, is_optimized: bool, name: str, user_id: str) -> AirfoilRecord:
         raise NotImplementedError
 
     def get_latest_airfoil(
@@ -177,6 +184,8 @@ class InMemoryStorageRepository(StorageRepository):
             drag=None,
             angle_of_attack=payload.angle_of_attack,
             created_by_user_id=payload.user_id,
+            is_saved=False,
+            name=None,
             created_at=now,
         )
         self._airfoils[airfoil_id] = airfoil
@@ -211,6 +220,8 @@ class InMemoryStorageRepository(StorageRepository):
             drag=payload.drag,
             angle_of_attack=payload.angle_of_attack,
             created_by_user_id=existing.created_by_user_id,
+            is_saved=existing.is_saved,
+            name=existing.name,
             created_at=existing.created_at,
         )
         self._airfoils[airfoil_id] = updated
@@ -243,11 +254,39 @@ class InMemoryStorageRepository(StorageRepository):
             drag=payload.drag,
             angle_of_attack=payload.angle_of_attack,
             created_by_user_id=payload.user_id,
+            is_saved=False,
+            name=None,
             created_at=now,
         )
         self._airfoils[airfoil_id] = airfoil
         self._airfoils_by_session.setdefault(payload.session_id, []).append(airfoil_id)
         return airfoil
+
+    def update_airfoil_save(self, session_id: str, is_optimized: bool, name: str, user_id: str) -> AirfoilRecord:
+        airfoil_id = self._find_latest_airfoil_id(session_id, is_optimized=is_optimized)
+        if airfoil_id is None:
+            raise ValueError("no matching airfoil for session")
+        existing = self._airfoils[airfoil_id]
+        if existing.created_by_user_id != user_id:
+            raise ValueError("user_id mismatch for airfoil")
+            
+        updated = AirfoilRecord(
+            id=existing.id,
+            cst_id=existing.cst_id,
+            session_id=existing.session_id,
+            is_optimized=existing.is_optimized,
+            cl=existing.cl,
+            cd=existing.cd,
+            lift=existing.lift,
+            drag=existing.drag,
+            angle_of_attack=existing.angle_of_attack,
+            created_by_user_id=existing.created_by_user_id,
+            is_saved=True,
+            name=name,
+            created_at=existing.created_at,
+        )
+        self._airfoils[airfoil_id] = updated
+        return updated
 
     def get_latest_airfoil(
         self, session_id: str, is_optimized: bool
@@ -271,7 +310,7 @@ class InMemoryStorageRepository(StorageRepository):
         airfoils = [
             airfoil
             for airfoil in self._airfoils.values()
-            if airfoil.created_by_user_id == user_id
+            if airfoil.created_by_user_id == user_id and airfoil.is_saved
         ]
         airfoils.sort(key=lambda item: item.created_at, reverse=True)
 
@@ -339,9 +378,11 @@ class PostgresStorageRepository(StorageRepository):
                         lift,
                         drag,
                         angle_of_attack,
-                        created_by_user_id
+                        created_by_user_id,
+                        is_saved,
+                        name
                     )
-                    VALUES (%s, %s, FALSE, NULL, NULL, NULL, NULL, %s, %s)
+                    VALUES (%s, %s, FALSE, NULL, NULL, NULL, NULL, %s, %s, FALSE, NULL)
                     RETURNING id
                     """,
                     (
@@ -445,9 +486,11 @@ class PostgresStorageRepository(StorageRepository):
                         lift,
                         drag,
                         angle_of_attack,
-                        created_by_user_id
+                        created_by_user_id,
+                        is_saved,
+                        name
                     )
-                    VALUES (%s, %s, TRUE, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, TRUE, %s, %s, %s, %s, %s, %s, FALSE, NULL)
                     RETURNING *
                     """,
                     (
@@ -486,6 +529,41 @@ class PostgresStorageRepository(StorageRepository):
             return None
         return _airfoil_from_row(row)
 
+    def update_airfoil_save(self, session_id: str, is_optimized: bool, name: str, user_id: str) -> AirfoilRecord:
+        with psycopg.connect(self._database_url, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM airfoils
+                    WHERE session_id = %s AND is_optimized = %s
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    FOR UPDATE
+                    """,
+                    (session_id, is_optimized),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    raise ValueError("no matching airfoil for session")
+                if str(row["created_by_user_id"]) != user_id:
+                    raise ValueError("user_id mismatch for airfoil")
+
+                cur.execute(
+                    """
+                    UPDATE airfoils
+                    SET is_saved = TRUE,
+                        name = %s
+                    WHERE id = %s
+                    RETURNING *
+                    """,
+                    (name, row["id"]),
+                )
+                updated = cur.fetchone()
+            conn.commit()
+
+        return _airfoil_from_row(updated)
+
     def list_cst_for_user(self, user_id: str) -> List[CstWithAirfoilRecord]:
         with psycopg.connect(self._database_url, row_factory=dict_row) as conn:
             with conn.cursor() as cur:
@@ -504,12 +582,14 @@ class PostgresStorageRepository(StorageRepository):
                         air.angle_of_attack,
                         air.created_by_user_id,
                         air.is_optimized,
+                        air.is_saved,
+                        air.name,
                         air.created_at AS airfoil_created_at
 
                     FROM cst
                     JOIN airfoils air ON air.cst_id = cst.id
-                    WHERE air.created_by_user_id = %s
-                    GROUP BY cst.id,  cst.weights_upper, cst.weights_lower, cst.chord_length, cst.created_at, air.cl, air.cd, air.lift, air.drag, air.angle_of_attack, air.created_by_user_id, air.is_optimized, air.created_at
+                    WHERE air.created_by_user_id = %s AND air.is_saved = TRUE
+                    GROUP BY cst.id,  cst.weights_upper, cst.weights_lower, cst.chord_length, cst.created_at, air.cl, air.cd, air.lift, air.drag, air.angle_of_attack, air.created_by_user_id, air.is_optimized, air.is_saved, air.name, air.created_at
                     ORDER BY MAX(air.created_at) DESC
                     """,
                     (user_id,),
@@ -543,9 +623,10 @@ def _cst_from_row(row: Dict[str, Any]) -> CstWithAirfoilRecord:
         angle_of_attack=row["angle_of_attack"],
         created_by_user_id=str(row["created_by_user_id"]),
         is_optimized=bool(row["is_optimized"]),
+        is_saved=bool(row.get("is_saved", False)),
+        name=row.get("name"),
         airfoil_created_at=row["airfoil_created_at"],
     )
-
 
 def _airfoil_from_row(row: Dict[str, Any]) -> AirfoilRecord:
     return AirfoilRecord(
@@ -559,6 +640,8 @@ def _airfoil_from_row(row: Dict[str, Any]) -> AirfoilRecord:
         drag=row["drag"],
         angle_of_attack=row["angle_of_attack"],
         created_by_user_id=str(row["created_by_user_id"]),
+        is_saved=bool(row.get("is_saved", False)),
+        name=row.get("name"),
         created_at=row["created_at"],
     )
 
