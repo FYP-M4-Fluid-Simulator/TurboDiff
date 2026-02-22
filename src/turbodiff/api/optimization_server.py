@@ -455,6 +455,13 @@ async def stream_optimization(ws: WebSocket, session_id: str):
         f"[optimize] Session {config.session_id}: starting {config.num_iterations} iterations"
     )
 
+    last_cl = None
+    last_cd = None
+    last_lift = None
+    last_drag = None
+    last_upper = None
+    last_lower = None
+
     try:
         for iteration in range(config.num_iterations):
             # --- Offload heavy JAX compute to thread pool ---
@@ -480,6 +487,13 @@ async def stream_optimization(ws: WebSocket, session_id: str):
             x_cst, y_upper_cst, y_lower_cst = generate_cst_coords(
                 cur_upper, cur_lower, num_points=config.num_cst_points
             )
+            
+            last_cl = float(C_L)
+            last_cd = float(C_D)
+            last_lift = float(lift_force)
+            last_drag = float(drag_force)
+            last_upper = cur_upper.tolist()
+            last_lower = cur_lower.tolist()
 
             cl_cd = float(C_L) / float(C_D) if abs(float(C_D)) > 1e-12 else 0.0
 
@@ -489,15 +503,15 @@ async def stream_optimization(ws: WebSocket, session_id: str):
                     "iteration": iteration + 1,
                     "total_iterations": config.num_iterations,
                     "loss": float(loss_val),
-                    "cl": float(C_L),
-                    "cd": float(C_D),
+                    "cl": last_cl,
+                    "cd": last_cd,
                     "cl_cd": cl_cd,
-                    "lift_force": float(lift_force),
-                    "drag_force": float(drag_force),
+                    "lift_force": last_lift,
+                    "drag_force": last_drag,
                 },
                 "shape": {
-                    "cst_upper": cur_upper.tolist(),
-                    "cst_lower": cur_lower.tolist(),
+                    "cst_upper": last_upper,
+                    "cst_lower": last_lower,
                     "airfoil_x": x_cst.tolist(),
                     "airfoil_y_upper": y_upper_cst.tolist(),
                     "airfoil_y_lower": y_lower_cst.tolist(),
@@ -558,4 +572,25 @@ async def stream_optimization(ws: WebSocket, session_id: str):
 
     except WebSocketDisconnect:
         print(f"[optimize] Session {config.session_id}: client disconnected")
-        return
+    finally:
+        if last_cl is not None and last_cd is not None and last_upper is not None and last_lower is not None:
+            print(f"Saving final optimized airfoil for session {config.session_id}: cl={last_cl:.4f}, cd={last_cd:.4f}")
+            try:
+                repo = get_storage_repository()
+                repo.save_optimized_airfoil(
+                    OptimizedAirfoilPayload(
+                        session_id=session_id,
+                        user_id=config.user_id,
+                        cst_weights_upper=last_upper,
+                        cst_weights_lower=last_lower,
+                        chord_length=config.chord_length,
+                        angle_of_attack=config.angle_of_attack,
+                        cl=last_cl,
+                        cd=last_cd,
+                        lift=last_lift,
+                        drag=last_drag,
+                    )
+                )
+            except Exception as e:
+                print(f"Failed to auto-save optimization metrics for session {session_id}: {e}")
+
