@@ -69,6 +69,23 @@ class CstRecord:
 
 
 @dataclass(frozen=True)
+class CstWithAirfoilRecord:
+    id: str
+    weights_upper: List[float]
+    weights_lower: List[float]
+    chord_length: float
+    cst_created_at: datetime
+    cl: Optional[float]
+    cd: Optional[float]
+    lift: Optional[float]
+    drag: Optional[float]
+    angle_of_attack: Optional[float]
+    created_by_user_id: str
+    is_optimized: bool
+    airfoil_created_at: datetime
+
+
+@dataclass(frozen=True)
 class AirfoilRecord:
     id: str
     cst_id: str
@@ -469,7 +486,7 @@ class PostgresStorageRepository(StorageRepository):
             return None
         return _airfoil_from_row(row)
 
-    def list_cst_for_user(self, user_id: str) -> List[CstRecord]:
+    def list_cst_for_user(self, user_id: str) -> List[CstWithAirfoilRecord]:
         with psycopg.connect(self._database_url, row_factory=dict_row) as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -479,12 +496,21 @@ class PostgresStorageRepository(StorageRepository):
                         cst.weights_upper,
                         cst.weights_lower,
                         cst.chord_length,
-                        cst.created_at
+                        cst.created_at AS cst_created_at,
+                        air.cl,
+                        air.cd,
+                        air.lift,
+                        air.drag,
+                        air.angle_of_attack,
+                        air.created_by_user_id,
+                        air.is_optimized,
+                        air.created_at AS airfoil_created_at
+
                     FROM cst
-                    JOIN airfoils ON airfoils.cst_id = cst.id
-                    WHERE airfoils.created_by_user_id = %s
-                    GROUP BY cst.id, cst.weights_upper, cst.weights_lower, cst.chord_length, cst.created_at
-                    ORDER BY MAX(airfoils.created_at) DESC
+                    JOIN airfoils air ON air.cst_id = cst.id
+                    WHERE air.created_by_user_id = %s
+                    GROUP BY cst.id,  cst.weights_upper, cst.weights_lower, cst.chord_length, cst.created_at, air.cl, air.cd, air.lift, air.drag, air.angle_of_attack, air.created_by_user_id, air.is_optimized, air.created_at
+                    ORDER BY MAX(air.created_at) DESC
                     """,
                     (user_id,),
                 )
@@ -503,13 +529,21 @@ class PostgresStorageRepository(StorageRepository):
         )
 
 
-def _cst_from_row(row: Dict[str, Any]) -> CstRecord:
-    return CstRecord(
+def _cst_from_row(row: Dict[str, Any]) -> CstWithAirfoilRecord:
+    return CstWithAirfoilRecord(
         id=str(row["id"]),
         weights_upper=list(row["weights_upper"]),
         weights_lower=list(row["weights_lower"]),
         chord_length=row["chord_length"],
-        created_at=row["created_at"],
+        cst_created_at=row["cst_created_at"],
+        cl=row["cl"],
+        cd=row["cd"],
+        lift=row["lift"],
+        drag=row["drag"],
+        angle_of_attack=row["angle_of_attack"],
+        created_by_user_id=str(row["created_by_user_id"]),
+        is_optimized=bool(row["is_optimized"]),
+        airfoil_created_at=row["airfoil_created_at"],
     )
 
 
