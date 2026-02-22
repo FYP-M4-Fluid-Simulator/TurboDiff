@@ -2,11 +2,30 @@
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from turbodiff.utils.dat_to_cst import CST_fitting
+from turbodiff.db.storage import get_storage_repository
 import tempfile
 import os
 import shutil
 
 router = APIRouter()
+
+
+@router.get("/cst")
+def list_cst_for_user(user_id: str):
+    repo = get_storage_repository()
+    csts = repo.list_cst_for_user(user_id)
+    return {
+        "items": [
+            {
+                "id": cst.id,
+                "weights_upper": cst.weights_upper,
+                "weights_lower": cst.weights_lower,
+                "chord_length": cst.chord_length,
+                "created_at": cst.created_at.isoformat(),
+            }
+            for cst in csts
+        ]
+    }
 
 
 @router.post("/get_cst_values")

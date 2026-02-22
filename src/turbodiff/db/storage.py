@@ -109,6 +109,9 @@ class StorageRepository:
     ) -> Optional[AirfoilRecord]:
         raise NotImplementedError
 
+    def list_cst_for_user(self, user_id: str) -> List[CstRecord]:
+        raise NotImplementedError
+
 
 class InMemoryStorageRepository(StorageRepository):
     def __init__(self) -> None:
@@ -246,6 +249,25 @@ class InMemoryStorageRepository(StorageRepository):
             if airfoil.is_optimized == is_optimized:
                 return airfoil_id
         return None
+
+    def list_cst_for_user(self, user_id: str) -> List[CstRecord]:
+        airfoils = [
+            airfoil
+            for airfoil in self._airfoils.values()
+            if airfoil.created_by_user_id == user_id
+        ]
+        airfoils.sort(key=lambda item: item.created_at, reverse=True)
+
+        seen: set[str] = set()
+        results: List[CstRecord] = []
+        for airfoil in airfoils:
+            if airfoil.cst_id in seen:
+                continue
+            seen.add(airfoil.cst_id)
+            cst = self._cst.get(airfoil.cst_id)
+            if cst is not None:
+                results.append(cst)
+        return results
 
 
 class PostgresStorageRepository(StorageRepository):
@@ -447,6 +469,28 @@ class PostgresStorageRepository(StorageRepository):
             return None
         return _airfoil_from_row(row)
 
+    def list_cst_for_user(self, user_id: str) -> List[CstRecord]:
+        with psycopg.connect(self._database_url, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        cst.id,
+                        cst.weights_upper,
+                        cst.weights_lower,
+                        cst.chord_length,
+                        cst.created_at
+                    FROM cst
+                    JOIN airfoils ON airfoils.cst_id = cst.id
+                    WHERE airfoils.created_by_user_id = %s
+                    GROUP BY cst.id, cst.weights_upper, cst.weights_lower, cst.chord_length, cst.created_at
+                    ORDER BY MAX(airfoils.created_at) DESC
+                    """,
+                    (user_id,),
+                )
+                rows = cur.fetchall()
+        return [_cst_from_row(row) for row in rows]
+
     @staticmethod
     def _ensure_user(cursor: psycopg.Cursor, user_id: str) -> None:
         cursor.execute(
@@ -457,6 +501,16 @@ class PostgresStorageRepository(StorageRepository):
             """,
             (user_id,),
         )
+
+
+def _cst_from_row(row: Dict[str, Any]) -> CstRecord:
+    return CstRecord(
+        id=str(row["id"]),
+        weights_upper=list(row["weights_upper"]),
+        weights_lower=list(row["weights_lower"]),
+        chord_length=row["chord_length"],
+        created_at=row["created_at"],
+    )
 
 
 def _airfoil_from_row(row: Dict[str, Any]) -> AirfoilRecord:
