@@ -14,6 +14,7 @@ router = APIRouter()
 def list_cst_for_user(user_id: str):
     repo = get_storage_repository()
     csts = repo.list_cst_for_user(user_id)
+    print(f"Listing CSTs for user {user_id}: Found {csts}")
     return {
         "items": [
             {
@@ -21,7 +22,15 @@ def list_cst_for_user(user_id: str):
                 "weights_upper": cst.weights_upper,
                 "weights_lower": cst.weights_lower,
                 "chord_length": cst.chord_length,
-                "created_at": cst.created_at.isoformat(),
+                "cst_created_at": cst.cst_created_at.isoformat(),
+                "cl": cst.cl,
+                "cd": cst.cd,
+                "lift": cst.lift,
+                "drag": cst.drag,
+                "angle_of_attack": cst.angle_of_attack,
+                "created_by_user_id": cst.created_by_user_id,
+                "is_optimized": cst.is_optimized,
+                "airfoil_created_at": cst.airfoil_created_at.isoformat(),
             }
             for cst in csts
         ]
