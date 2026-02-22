@@ -269,7 +269,7 @@ async def stream_state(ws: WebSocket, session_id: str):
     grid.is_wind_tunnel = True
     grid.inlet_velocity = config.inflow_velocity
     angle_deg = config.angle_of_attack or 0.0
-    grid.inlet_angle_rad = float(jnp.deg2rad(angle_deg))
+    # Wind stays horizontal; the airfoil is rotated instead.
 
     state = grid.create_initial_state()
 
@@ -277,11 +277,23 @@ async def stream_state(ws: WebSocket, session_id: str):
         config.height, config.width, config.cell_size
     )
 
+    # Rotate the airfoil by rotating the grid sample coords in the opposite
+    # direction around the airfoil's midpoint (leading-edge + half-chord).
+    pivot_x = config.airfoil_offset_x + config.chord_length / 2.0
+    pivot_y = config.airfoil_offset_y
+    angle_rad = float(jnp.deg2rad(angle_deg))
+    cos_a, sin_a = jnp.cos(angle_rad), jnp.sin(angle_rad)
+    dx = grid_x - pivot_x
+    dy = grid_y - pivot_y
+    # Rotate grid points by +angle (equivalent to rotating airfoil by -angle)
+    grid_x_rot = cos_a * dx + sin_a * dy + pivot_x
+    grid_y_rot = -sin_a * dx + cos_a * dy + pivot_y
+
     airfoil_mask = create_airfoil_solid_mask(
         jnp.asarray(cst_upper),
         jnp.asarray(cst_lower),
-        grid_x,
-        grid_y,
+        grid_x_rot,
+        grid_y_rot,
         config.airfoil_offset_x,
         config.airfoil_offset_y,
         config.chord_length,
