@@ -348,6 +348,8 @@ async def stream_state(ws: WebSocket, session_id: str):
 
     max_steps = int(config.sim_time / config.dt) if config.sim_time > 0 else -1
     step = 0
+    last_cl: float | None = None
+    last_cd: float | None = None
 
     print(f"   Starting simulation for session {config.session_id}")
     print(f"   sim_time={config.sim_time}s, dt={config.dt}s, max_steps={max_steps}")
@@ -377,6 +379,9 @@ async def stream_state(ws: WebSocket, session_id: str):
                     inflow_velocity=config.inflow_velocity,
                     chord_length=config.chord_length,
                 )
+                
+                last_cl = float(cl)
+                last_cd = float(cd)
 
                 # Avoid division by zero for L/D
                 l_d = cl / cd if abs(cd) > 1e-9 else 0.0
@@ -395,8 +400,8 @@ async def stream_state(ws: WebSocket, session_id: str):
                         "airfoil_offset_y": float(config.airfoil_offset_y),
                         "time": float(state.time),
                         "step": int(state.step),
-                        "cl": float(cl),
-                        "cd": float(cd),
+                        "cl": last_cl,
+                        "cd": last_cd,
                         "l_d": float(l_d),
                     },
                     "fields": {
@@ -420,4 +425,22 @@ async def stream_state(ws: WebSocket, session_id: str):
 
     except WebSocketDisconnect:
         print(f"WebSocket disconnected for session {config.session_id}")
-        return
+    finally:
+        if last_cl is not None and last_cd is not None:
+            print(f"Saving final metrics for session {config.session_id}: cl={last_cl:.4f}, cd={last_cd:.4f}")
+            try:
+                repo = get_storage_repository()
+                repo.update_simulation_metrics(
+                    SimulationMetricsUpdate(
+                        session_id=session_id,
+                        user_id=config.user_id,
+                        cl=last_cl,
+                        cd=last_cd,
+                        lift=None,
+                        drag=None,
+                        angle_of_attack=config.angle_of_attack,
+                    )
+                )
+            except Exception as e:
+                print(f"Failed to auto-save simulation metrics for session {session_id}: {e}")
+
