@@ -96,3 +96,39 @@ def test_save_optimized_airfoil_creates_new_record():
     assert optimized.is_optimized is True
     assert optimized.cl == 1.2
     assert optimized.cd == 0.08
+
+
+def test_list_cst_for_user_returns_unique_items():
+    repo = InMemoryStorageRepository()
+    repo.create_session_with_airfoil(
+        SessionCreatePayload(
+            session_id="session-4",
+            user_id="user-4",
+            session_type="optimize",
+            parameters={},
+            cst_weights_upper=[0.1, 0.2],
+            cst_weights_lower=[-0.1, -0.2],
+            chord_length=0.25,
+            angle_of_attack=None,
+        )
+    )
+    repo.save_optimized_airfoil(
+        OptimizedAirfoilPayload(
+            session_id="session-4",
+            user_id="user-4",
+            cst_weights_upper=[0.15, 0.25],
+            cst_weights_lower=[-0.12, -0.22],
+            chord_length=0.25,
+            angle_of_attack=2.0,
+            cl=1.1,
+            cd=0.09,
+            lift=2.4,
+            drag=0.22,
+        )
+    )
+
+    items = repo.list_cst_for_user("user-4")
+    assert len(items) == 2
+    weights = {(tuple(item.weights_upper), tuple(item.weights_lower)) for item in items}
+    assert ((0.1, 0.2), (-0.1, -0.2)) in weights
+    assert ((0.15, 0.25), (-0.12, -0.22)) in weights

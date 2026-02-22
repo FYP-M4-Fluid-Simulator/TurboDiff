@@ -68,3 +68,6 @@ def test_postgres_storage_round_trip():
     )
     assert optimized.is_optimized is True
     assert optimized.cl == 1.3
+
+    csts = repo.list_cst_for_user(user_id)
+    assert len(csts) >= 2
