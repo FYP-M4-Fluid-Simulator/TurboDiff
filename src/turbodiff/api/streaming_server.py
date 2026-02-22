@@ -24,10 +24,22 @@ from turbodiff.db.storage import (
 )
 
 
+# Grid fidelity presets — keys match the frontend "meshDensity" values after mapping.
+# (height, width) in grid cells.
 FIDELITY_MAP: Dict[str, Tuple[int, int]] = {
-    "low": (64, 128),
-    "medium": (128, 256),
-    "coarse": (256, 512),
+    "low": (64, 128),  # Coarse  (Fast)
+    "medium": (128, 256),  # Medium  (Balanced)
+    "high": (256, 512),  # Fine    (Detailed)
+    "ultra": (512, 1024),  # Ultra   (Precise)
+}
+
+# Default cell size (metres) for each fidelity level.
+# Keeps the airfoil chord at ≈ 40 cells regardless of resolution.
+CELL_SIZE_MAP: Dict[str, float] = {
+    "low": 0.08,
+    "medium": 0.04,
+    "high": 0.02,
+    "ultra": 0.01,
 }
 
 router = APIRouter()
@@ -39,7 +51,6 @@ class SessionRequest(BaseModel):
     fidelity: str = Field("medium", description="low | medium | coarse")
     sim_time: float = Field(0.0, ge=0.0, description="Seconds; 0 for infinite")
     dt: float = Field(0.01, gt=0.0)
-    cell_size: float = Field(0.01, gt=0.0)
     diffusion: float = Field(0.01, ge=0.0)
     viscosity: float = Field(0.01, ge=0.0)
     boundary_type: int = Field(2, ge=0, le=2)
@@ -89,7 +100,7 @@ def _get_fidelity(fidelity: str) -> Tuple[int, int]:
     fidelity_key = fidelity.lower()
     if fidelity_key not in FIDELITY_MAP:
         options = ", ".join(sorted(FIDELITY_MAP.keys()))
-        raise ValueError(f"Invalid fidelity={fidelity}. Options: {options}")
+        raise ValueError(f"Invalid fidelity='{fidelity}'. Valid options: {options}")
     return FIDELITY_MAP[fidelity_key]
 
 
@@ -136,9 +147,16 @@ def create_session(request: SessionRequest):
             detail="Both cst_upper and cst_lower must be provided together, or both be null.",
         )
 
-    chord_length = request.chord_length or (40 * request.cell_size)
-    airfoil_offset_x = request.airfoil_offset_x or (30 * request.cell_size)
-    airfoil_offset_y = request.airfoil_offset_y or (height // 2 * request.cell_size)
+    # Resolve cell_size: use the per-fidelity default when the caller sends the
+    # generic default (0.01) so the airfoil always covers ~40 cells of chord.
+    fidelity_key = request.fidelity.lower()
+    cell_size = CELL_SIZE_MAP[fidelity_key]
+
+    # Default chord length: 1.0 m, giving 25–200 cells/chord across fidelity levels.
+    # Users can override via request.chord_length.
+    chord_length = request.chord_length or 1.0
+    airfoil_offset_x = request.airfoil_offset_x or (30 * cell_size)
+    airfoil_offset_y = request.airfoil_offset_y or (height // 2 * cell_size)
 
     session_id = str(uuid4())
     config = SessionConfig(
@@ -148,7 +166,7 @@ def create_session(request: SessionRequest):
         width=width,
         sim_time=request.sim_time,
         dt=request.dt,
-        cell_size=request.cell_size,
+        cell_size=cell_size,
         diffusion=request.diffusion,
         viscosity=request.viscosity,
         boundary_type=request.boundary_type,
@@ -172,6 +190,7 @@ def create_session(request: SessionRequest):
         "resolved": {
             "height": height,
             "width": width,
+            "cell_size": cell_size,
             "chord_length": chord_length,
             "airfoil_offset_x": airfoil_offset_x,
             "airfoil_offset_y": airfoil_offset_y,
@@ -371,6 +390,9 @@ async def stream_state(ws: WebSocket, session_id: str):
                         "height": int(config.height),
                         "width": int(config.width),
                         "cell_size": float(config.cell_size),
+                        "chord_length": float(config.chord_length),
+                        "airfoil_offset_x": float(config.airfoil_offset_x),
+                        "airfoil_offset_y": float(config.airfoil_offset_y),
                         "time": float(state.time),
                         "step": int(state.step),
                         "cl": float(cl),
