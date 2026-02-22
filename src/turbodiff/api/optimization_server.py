@@ -48,10 +48,10 @@ FIDELITY_MAP: Dict[str, Tuple[int, int]] = {
 # Default cell size (metres) for each fidelity level.
 # Keeps the airfoil chord at ≈ 40 cells regardless of resolution.
 CELL_SIZE_MAP: Dict[str, float] = {
-    "low": 0.04,
-    "medium": 0.02,
-    "high": 0.01,
-    "ultra": 0.005,
+    "low": 0.08,
+    "medium": 0.04,
+    "high": 0.02,
+    "ultra": 0.01,
 }
 
 router = APIRouter(prefix="/optimize", tags=["optimization"])
@@ -189,11 +189,7 @@ def create_opt_session(request: OptSessionRequest):
     # Resolve cell_size: use the per-fidelity default when caller omits it,
     # keeping airfoil at ≈ 40 cells of chord across all fidelity levels.
     fidelity_key = request.fidelity.lower()
-    cell_size = (
-        request.cell_size
-        if request.cell_size is not None
-        else CELL_SIZE_MAP[fidelity_key]
-    )
+    cell_size = CELL_SIZE_MAP[fidelity_key]
 
     # Default chord length: 1.0 m (within 0.5–2 m range).
     # Users can override via request.chord_length.

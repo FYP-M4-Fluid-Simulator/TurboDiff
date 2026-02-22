@@ -36,10 +36,10 @@ FIDELITY_MAP: Dict[str, Tuple[int, int]] = {
 # Default cell size (metres) for each fidelity level.
 # Keeps the airfoil chord at ≈ 40 cells regardless of resolution.
 CELL_SIZE_MAP: Dict[str, float] = {
-    "low": 0.04,
-    "medium": 0.02,
-    "high": 0.01,
-    "ultra": 0.005,
+    "low": 0.08,
+    "medium": 0.04,
+    "high": 0.02,
+    "ultra": 0.01,
 }
 
 router = APIRouter()
@@ -51,7 +51,6 @@ class SessionRequest(BaseModel):
     fidelity: str = Field("medium", description="low | medium | coarse")
     sim_time: float = Field(0.0, ge=0.0, description="Seconds; 0 for infinite")
     dt: float = Field(0.01, gt=0.0)
-    cell_size: float = Field(0.01, gt=0.0)
     diffusion: float = Field(0.01, ge=0.0)
     viscosity: float = Field(0.01, ge=0.0)
     boundary_type: int = Field(2, ge=0, le=2)
@@ -151,11 +150,7 @@ def create_session(request: SessionRequest):
     # Resolve cell_size: use the per-fidelity default when the caller sends the
     # generic default (0.01) so the airfoil always covers ~40 cells of chord.
     fidelity_key = request.fidelity.lower()
-    cell_size = (
-        CELL_SIZE_MAP.get(fidelity_key, request.cell_size)
-        if request.cell_size == 0.01  # unchanged from schema default
-        else request.cell_size
-    )
+    cell_size = CELL_SIZE_MAP[fidelity_key]
 
     # Default chord length: 1.0 m, giving 25–200 cells/chord across fidelity levels.
     # Users can override via request.chord_length.
