@@ -1,6 +1,6 @@
 """all CST related endpoints"""
 
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, Form, HTTPException, UploadFile, File
 from turbodiff.utils.dat_to_cst import CST_fitting
 from turbodiff.db.storage import get_storage_repository
 import tempfile
@@ -41,8 +41,8 @@ def list_cst_for_user(user_id: str):
 @router.post("/get_cst_values")
 async def get_cst_values(
     file: UploadFile = File(...),
-    bernenstein_order: int = 8,
-    leading_edge_radius: float = 0.015867,
+    bernenstein_order: int = Form(8),
+    leading_edge_radius: float = Form(0.015867),
 ):
     temp_file_path = None
     output_file_path = None
