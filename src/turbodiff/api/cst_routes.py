@@ -19,6 +19,7 @@ def list_cst_for_user(user_id: str):
         "items": [
             {
                 "id": cst.id,
+                "name" : f"Airfoil {i}",
                 "weights_upper": cst.weights_upper,
                 "weights_lower": cst.weights_lower,
                 "chord_length": cst.chord_length,
@@ -32,7 +33,7 @@ def list_cst_for_user(user_id: str):
                 "is_optimized": cst.is_optimized,
                 "airfoil_created_at": cst.airfoil_created_at.isoformat(),
             }
-            for cst in csts
+            for i, cst in enumerate(csts)
         ]
     }
 
