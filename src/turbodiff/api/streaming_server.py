@@ -131,7 +131,7 @@ def _extract_cell_fields(state, cell_size):
 
 @router.get("/health")
 def health_check():
-    return {"status": "ok"}
+    return {"status": "healthy"}
 
 
 @router.post("/sessions")
