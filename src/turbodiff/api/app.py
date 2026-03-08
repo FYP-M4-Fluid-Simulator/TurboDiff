@@ -1,5 +1,5 @@
 from __future__ import annotations
-from examples.example_file import a, b, unused_function, math  # This import is intentionally unused to demonstrate SonarQube's ability to detect unused imports
+
 from typing import Dict, Tuple
 
 from fastapi import FastAPI
