@@ -26,7 +26,8 @@ dependencies = [
   "websockets",
   "python-multipart",
   "psycopg[binary]>=3.1",
-  "python-dotenv>=1.0"
+  "python-dotenv>=1.0",
+  "firebase-admin>=6.4.0"
 ]
 
 [project.optional-dependencies]

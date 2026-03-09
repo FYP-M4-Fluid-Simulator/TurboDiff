@@ -8,8 +8,9 @@ from typing import Dict, List, Tuple
 from uuid import uuid4
 
 import jax.numpy as jnp
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Depends
 from pydantic import BaseModel, Field
+from turbodiff.api.auth import get_current_user
 
 from turbodiff.core.airfoil_optimization import (
     compute_grid_coordinates,
@@ -47,7 +48,7 @@ _SESSIONS: Dict[str, "SessionConfig"] = {}
 
 
 class SessionRequest(BaseModel):
-    user_id: str = Field(..., description="User identifier")
+    user_id: str | None = Field(None, description="User identifier")
     fidelity: str = Field("medium", description="low | medium | coarse")
     sim_time: float = Field(0.0, ge=0.0, description="Seconds; 0 for infinite")
     dt: float = Field(0.01, gt=0.0)
@@ -135,7 +136,8 @@ def health_check():
 
 
 @router.post("/sessions")
-def create_session(request: SessionRequest):
+def create_session(request: SessionRequest, user: dict = Depends(get_current_user)):
+    user_id = user.get("uid")
     try:
         height, width = _get_fidelity(request.fidelity)
     except ValueError as exc:
@@ -161,7 +163,7 @@ def create_session(request: SessionRequest):
     session_id = str(uuid4())
     config = SessionConfig(
         session_id=session_id,
-        user_id=request.user_id,
+        user_id=user_id,
         height=height,
         width=width,
         sim_time=request.sim_time,
@@ -200,7 +202,7 @@ def create_session(request: SessionRequest):
         storage = repo.create_session_with_airfoil(
             SessionCreatePayload(
                 session_id=session_id,
-                user_id=request.user_id,
+                user_id=user_id,
                 session_type="simulate",
                 parameters=parameters,
                 cst_weights_upper=request.cst_upper or [],
@@ -222,40 +224,10 @@ def create_session(request: SessionRequest):
     }
 
 
-class SimulationSaveRequest(BaseModel):
-    user_id: str = Field(..., description="User identifier")
-    cl: float | None = None
-    cd: float | None = None
-    lift: float | None = None
-    drag: float | None = None
-    angle_of_attack: float | None = None
-
-
-@router.post("/sessions/{session_id}/save")
-def save_simulation_metrics(session_id: str, request: SimulationSaveRequest):
-    repo = get_storage_repository()
-    try:
-        airfoil = repo.update_simulation_metrics(
-            SimulationMetricsUpdate(
-                session_id=session_id,
-                user_id=request.user_id,
-                cl=request.cl,
-                cd=request.cd,
-                lift=request.lift,
-                drag=request.drag,
-                angle_of_attack=request.angle_of_attack,
-            )
-        )
-    except ValueError as exc:
-        detail = str(exc)
-        status = 404 if "no matching airfoil" in detail else 400
-        raise HTTPException(status_code=status, detail=detail) from exc
-
-    return {"airfoil_id": airfoil.id}
-
-
 @router.websocket("/ws/{session_id}")
 async def stream_state(ws: WebSocket, session_id: str):
+    user = ws.state.user
+
     config = _SESSIONS.get(session_id)
     if config is None:
         await ws.accept()

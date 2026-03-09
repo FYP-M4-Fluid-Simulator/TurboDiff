@@ -13,8 +13,9 @@ from uuid import uuid4
 
 import jax
 import jax.numpy as jnp
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Depends
 from pydantic import BaseModel, Field
+from turbodiff.api.auth import get_current_user
 
 from turbodiff.core.airfoil import generate_cst_coords, thickness_at_x
 from turbodiff.core.airfoil_optimization import (
@@ -67,7 +68,7 @@ _OPT_SESSIONS: Dict[str, "OptSessionConfig"] = {}
 class OptSessionRequest(BaseModel):
     """Parameters to create an optimization session."""
 
-    user_id: str = Field(..., description="User identifier")
+    user_id: str | None = Field(None, description="User identifier")
 
     fidelity: str = Field("low", description="low | medium | high | ultra")
 
@@ -178,8 +179,9 @@ def _get_fidelity(fidelity: str) -> Tuple[int, int]:
 
 
 @router.post("/sessions")
-def create_opt_session(request: OptSessionRequest):
+def create_opt_session(request: OptSessionRequest, user: dict = Depends(get_current_user)):
     """Create a new optimization session and return its ID."""
+    user_id = user.get("uid")
 
     try:
         height, width = _get_fidelity(request.fidelity)
@@ -200,7 +202,7 @@ def create_opt_session(request: OptSessionRequest):
     session_id = str(uuid4())
     config = OptSessionConfig(
         session_id=session_id,
-        user_id=request.user_id,
+        user_id=user_id,
         height=height,
         width=width,
         cst_upper=request.cst_upper,
@@ -245,7 +247,7 @@ def create_opt_session(request: OptSessionRequest):
         storage = repo.create_session_with_airfoil(
             SessionCreatePayload(
                 session_id=session_id,
-                user_id=request.user_id,
+                user_id=user_id,
                 session_type="optimize",
                 parameters=parameters,
                 cst_weights_upper=request.cst_upper,
@@ -265,47 +267,6 @@ def create_opt_session(request: OptSessionRequest):
             "cst_id": storage.cst_id,
         },
     }
-
-
-class OptimizationSaveRequest(BaseModel):
-    user_id: str = Field(..., description="User identifier")
-    cst_upper: List[float]
-    cst_lower: List[float]
-    chord_length: float | None = None
-    angle_of_attack: float | None = None
-    cl: float | None = None
-    cd: float | None = None
-    lift: float | None = None
-    drag: float | None = None
-
-
-@router.post("/sessions/{session_id}/save")
-def save_optimized_airfoil(session_id: str, request: OptimizationSaveRequest):
-    config = _OPT_SESSIONS.get(session_id)
-    if config is None:
-        raise HTTPException(status_code=404, detail="unknown session_id")
-
-    chord_length = request.chord_length or config.chord_length
-    repo = get_storage_repository()
-    try:
-        airfoil = repo.save_optimized_airfoil(
-            OptimizedAirfoilPayload(
-                session_id=session_id,
-                user_id=request.user_id,
-                cst_weights_upper=request.cst_upper,
-                cst_weights_lower=request.cst_lower,
-                chord_length=chord_length,
-                angle_of_attack=request.angle_of_attack,
-                cl=request.cl,
-                cd=request.cd,
-                lift=request.lift,
-                drag=request.drag,
-            )
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    return {"airfoil_id": airfoil.id}
 
 
 def _build_optimization_fns(config: OptSessionConfig):
@@ -425,6 +386,7 @@ def _run_iteration(params, compute_loss_with_aux, grad_fn, config):
 @router.websocket("/ws/{session_id}")
 async def stream_optimization(ws: WebSocket, session_id: str):
     """Run airfoil optimization and stream each iteration's results."""
+    user = ws.state.user
 
     config = _OPT_SESSIONS.get(session_id)
     if config is None:
