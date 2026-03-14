@@ -427,6 +427,99 @@ class FluidGrid:
         )
 
     @jax.jit
+    def diffuse_velocity(self, state: FluidState, num_iters: int = 20) -> FluidState:
+        """
+        Perform Gauss–Seidel diffusion on the velocity field (implicit viscosity).
+        Should be applied before advection/projection.
+        """
+        # Short-circuit if viscosity is 0
+        if self.viscosity <= 0.0:
+            return state
+
+        dt = self.dt
+        nu = self.viscosity
+        cell_size = self.cell_size
+        solid = state.solid_mask
+        a = dt * nu / (cell_size * cell_size)
+
+        u0 = state.velocity.u
+        v0 = state.velocity.v
+
+        # We need masks for u-faces and v-faces just like how apply_zero_velocity_at_solids handles it
+        # Actually, let's just do standard interior masking:
+        # u is shape (height, width+1). Interior is [1:-1, 1:-1]
+
+        # Fix array shape expansion
+        u_interior_mask = jnp.ones_like(u0)
+        solid_u_left = solid[:, :-1]
+        solid_u_right = solid[:, 1:]
+        u_interior_mask = u_interior_mask.at[:, 1:-1].set(
+            (1.0 - jnp.logical_or(solid_u_left, solid_u_right)).astype(jnp.float32)
+        )
+
+        v_interior_mask = jnp.ones_like(v0)
+        solid_v_top = solid[:-1, :]
+        solid_v_bottom = solid[1:, :]
+        v_interior_mask = v_interior_mask.at[1:-1, :].set(
+            (1.0 - jnp.logical_or(solid_v_top, solid_v_bottom)).astype(jnp.float32)
+        )
+
+        @jax.jit
+        def gs_u(u_tuple):
+            u, u_init = u_tuple
+
+            up = u[:-2, 1:-1]
+            down = u[2:, 1:-1]
+            left = u[1:-1, :-2]
+            right = u[1:-1, 2:]
+
+            # Simple boundary check for neighbors (assume solid = 0 velocity)
+            # A more accurate solver would use proper face-masked counts here, but
+            # for stability we can just enforce full neighbor connectivity internally
+            neighbors = up + down + left + right
+            new_u_center = (u_init[1:-1, 1:-1] + a * neighbors) / (1.0 + 4.0 * a)
+
+            mask = u_interior_mask[1:-1, 1:-1]
+            new_u_center = mask * new_u_center + (1.0 - mask) * u[1:-1, 1:-1]
+
+            return (u.at[1:-1, 1:-1].set(new_u_center), u_init)
+
+        @jax.jit
+        def gs_v(v_tuple):
+            v, v_init = v_tuple
+
+            up = v[:-2, 1:-1]
+            down = v[2:, 1:-1]
+            left = v[1:-1, :-2]
+            right = v[1:-1, 2:]
+
+            neighbors = up + down + left + right
+            new_v_center = (v_init[1:-1, 1:-1] + a * neighbors) / (1.0 + 4.0 * a)
+
+            mask = v_interior_mask[1:-1, 1:-1]
+            new_v_center = mask * new_v_center + (1.0 - mask) * v[1:-1, 1:-1]
+
+            return (v.at[1:-1, 1:-1].set(new_v_center), v_init)
+
+        # Diffuse U
+        u_new, _ = jax.lax.fori_loop(0, num_iters, lambda _, u_t: gs_u(u_t), (u0, u0))
+        # Diffuse V
+        v_new, _ = jax.lax.fori_loop(0, num_iters, lambda _, v_t: gs_v(v_t), (v0, v0))
+
+        # Enforce exact boundaries correctly using existing utility
+        u_new, v_new = apply_zero_velocity_at_solids(u_new, v_new, state.solid_mask)
+
+        return state.__class__(
+            density=state.density,
+            velocity=state.velocity.with_values(u_new, v_new),
+            pressure=state.pressure,
+            solid_mask=state.solid_mask,
+            sources=state.sources,
+            time=state.time,
+            step=state.step,
+        )
+
+    @jax.jit
     def inject_wind_tunnel_velocity(self, state: FluidState) -> FluidState:
         """
         Inject velocity at the left inlet boundary for wind tunnel mode.
@@ -676,6 +769,7 @@ class FluidGrid:
         state = self.advect_density(state)
 
         # Velocity step
+        state = self.diffuse_velocity(state, num_iters=20)
         state = self.advect_velocity(state)
 
         # Inject wind tunnel velocity if in wind tunnel mode
