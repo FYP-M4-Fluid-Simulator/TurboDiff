@@ -130,6 +130,7 @@ async def validate_cst(websocket: WebSocket):
                 "u": to_list(state.velocity.u),
                 "v": to_list(state.velocity.v),
                 "curl": to_list(curl_field),
+                "tracer": to_list(state.density.values),
             }
 
             await websocket.send_json(payload)

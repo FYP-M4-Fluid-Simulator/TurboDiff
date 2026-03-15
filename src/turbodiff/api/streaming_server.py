@@ -127,7 +127,7 @@ def _extract_cell_fields(state, cell_size):
     u_center = 0.5 * (u[:, :-1] + u[:, 1:])
     v_center = 0.5 * (v[:-1, :] + v[1:, :])
     curl = _compute_curl(u, v, cell_size)
-    return u_center, v_center, curl, state.pressure.values, state.solid_mask
+    return u_center, v_center, curl, state.pressure.values, state.solid_mask, state.density.values
 
 
 @router.get("/health")
@@ -358,7 +358,7 @@ async def stream_state(ws: WebSocket, session_id: str):
                 # Avoid division by zero for L/D
                 l_d = cl / cd if abs(cd) > 1e-9 else 0.0
 
-                u_center, v_center, curl, pressure, solid = _extract_cell_fields(
+                u_center, v_center, curl, pressure, solid, density = _extract_cell_fields(
                     state, config.cell_size
                 )
                 payload = {
@@ -382,6 +382,7 @@ async def stream_state(ws: WebSocket, session_id: str):
                         "curl": jnp.asarray(curl).tolist(),
                         "pressure": jnp.asarray(pressure).tolist(),
                         "solid": jnp.asarray(solid).astype(int).tolist(),
+                        "tracer": jnp.asarray(density).tolist(),
                     },
                 }
                 await ws.send_json(payload)
