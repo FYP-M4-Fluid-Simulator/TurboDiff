@@ -1,6 +1,7 @@
 from typing import Optional
 from starlette.requests import HTTPConnection
 from fastapi import HTTPException, Depends, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.security.utils import get_authorization_scheme_param
 import firebase_admin
 from firebase_admin import credentials, auth
@@ -11,18 +12,25 @@ try:
 except Exception as e:
     print(f"Warning: Could not initialize Firebase Admin SDK automatically. Error: {e}")
 
-async def get_current_user(connection: HTTPConnection):
+bearer_scheme = HTTPBearer(auto_error=False)
+
+async def get_current_user(
+    connection: HTTPConnection,
+    bearer: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme)
+):
     """
     Universal dependency to get the current user from Firebase JWT token.
     """
     token = None
-    
-    # 1. Check Authorization Header
-    authorization = connection.headers.get("Authorization")
-    if authorization:
-        scheme, credentials = get_authorization_scheme_param(authorization)
-        if scheme.lower() == "bearer":
-            token = credentials
+    if bearer:
+        token = bearer.credentials
+    else:
+        # Fallback for manual check if HTTPBearer didn't catch it
+        authorization = connection.headers.get("Authorization")
+        if authorization:
+            scheme, auth_cred = get_authorization_scheme_param(authorization)
+            if scheme.lower() == "bearer":
+                token = auth_cred
     
     # 2. Check Query Parameters (fallback for WebSockets)
     if not token:
