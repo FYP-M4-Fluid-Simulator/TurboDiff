@@ -133,6 +133,12 @@ class StorageRepository:
     ) -> Optional[AirfoilRecord]:
         raise NotImplementedError
 
+    def get_cst(self, cst_id: str) -> Optional[CstRecord]:
+        raise NotImplementedError
+
+    def get_session(self, session_id: str) -> Optional[SessionRecord]:
+        raise NotImplementedError
+
     def list_cst_for_user(self, user_id: str) -> List[CstRecord]:
         raise NotImplementedError
 
@@ -143,6 +149,12 @@ class InMemoryStorageRepository(StorageRepository):
         self._cst: Dict[str, CstRecord] = {}
         self._airfoils: Dict[str, AirfoilRecord] = {}
         self._airfoils_by_session: Dict[str, List[str]] = {}
+
+    def get_cst(self, cst_id: str) -> Optional[CstRecord]:
+        return self._cst.get(cst_id)
+
+    def get_session(self, session_id: str) -> Optional[SessionRecord]:
+        return self._sessions.get(session_id)
 
     def create_session_with_airfoil(
         self, payload: SessionCreatePayload
@@ -528,6 +540,36 @@ class PostgresStorageRepository(StorageRepository):
         if row is None:
             return None
         return _airfoil_from_row(row)
+
+    def get_cst(self, cst_id: str) -> Optional[CstRecord]:
+        with psycopg.connect(self._database_url, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM cst WHERE id = %s", (cst_id,))
+                row = cur.fetchone()
+        if row is None:
+            return None
+        return CstRecord(
+            id=str(row["id"]),
+            weights_upper=list(row["weights_upper"]),
+            weights_lower=list(row["weights_lower"]),
+            chord_length=row["chord_length"],
+            created_at=row["created_at"],
+        )
+
+    def get_session(self, session_id: str) -> Optional[SessionRecord]:
+        with psycopg.connect(self._database_url, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM sessions WHERE id = %s", (session_id,))
+                row = cur.fetchone()
+        if row is None:
+            return None
+        return SessionRecord(
+            id=str(row["id"]),
+            user_id=str(row["user_id"]),
+            session_type=row["session_type"],
+            parameters=row["parameters"] or {},
+            created_at=row["created_at"],
+        )
 
     def update_airfoil_save(self, session_id: str, is_optimized: bool, name: str, user_id: str) -> AirfoilRecord:
         with psycopg.connect(self._database_url, row_factory=dict_row) as conn:

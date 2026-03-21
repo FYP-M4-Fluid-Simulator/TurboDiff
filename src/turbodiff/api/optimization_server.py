@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Depends
 from pydantic import BaseModel, Field
-from turbodiff.api.auth import get_current_user
+from turbodiff.api.auth import get_current_user, verify_websocket_token
 
 from turbodiff.core.airfoil import generate_cst_coords, thickness_at_x
 from turbodiff.core.airfoil_optimization import (
@@ -58,6 +58,7 @@ CELL_SIZE_MAP: Dict[str, float] = {
 router = APIRouter(prefix="/optimize", tags=["optimization"])
 
 _OPT_SESSIONS: Dict[str, "OptSessionConfig"] = {}
+_OPT_RESULTS: Dict[str, dict] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -386,16 +387,19 @@ def _run_iteration(params, compute_loss_with_aux, grad_fn, config):
 @router.websocket("/ws/{session_id}")
 async def stream_optimization(ws: WebSocket, session_id: str):
     """Run airfoil optimization and stream each iteration's results."""
-    user = ws.state.user
+    await ws.accept()
 
-    config = _OPT_SESSIONS.get(session_id)
-    if config is None:
-        await ws.accept()
-        await ws.send_json({"error": "unknown session_id"})
+    user = await verify_websocket_token(ws)
+    if user is None:
+        await ws.send_json({"error": "Missing or invalid authentication token"})
         await ws.close(code=1008)
         return
 
-    await ws.accept()
+    config = _OPT_SESSIONS.get(session_id)
+    if config is None:
+        await ws.send_json({"error": "unknown session_id"})
+        await ws.close(code=1008)
+        return
 
     # Build functions (fast — no actual computation yet)
     n_weights, compute_loss_with_aux, grad_fn = _build_optimization_fns(config)
@@ -504,30 +508,31 @@ async def stream_optimization(ws: WebSocket, session_id: str):
             final_upper, final_lower, num_points=config.num_cst_points
         )
 
-        await ws.send_json(
-            {
-                "type": "complete",
-                "meta": {
-                    "total_iterations": config.num_iterations,
-                    "final_cl": float(C_L),
-                    "final_cd": float(C_D),
-                    "final_cl_cd": cl_cd,
-                    "final_drag": float(drag_force),
-                    "final_loss": float(loss_val),
-                },
-                "shape": {
-                    "cst_upper": final_upper.tolist(),
-                    "cst_lower": final_lower.tolist(),
-                    "airfoil_x": x_final.tolist(),
-                    "airfoil_y_upper": y_upper_final.tolist(),
-                    "airfoil_y_lower": y_lower_final.tolist(),
-                },
-                "initial_shape": {
-                    "cst_upper": config.cst_upper,
-                    "cst_lower": config.cst_lower,
-                },
-            }
-        )
+        final_payload = {
+            "type": "complete",
+            "meta": {
+                "total_iterations": config.num_iterations,
+                "final_cl": float(C_L),
+                "final_cd": float(C_D),
+                "final_cl_cd": cl_cd,
+                "final_drag": float(drag_force),
+                "final_loss": float(loss_val),
+            },
+            "shape": {
+                "cst_upper": final_upper.tolist(),
+                "cst_lower": final_lower.tolist(),
+                "airfoil_x": x_final.tolist(),
+                "airfoil_y_upper": y_upper_final.tolist(),
+                "airfoil_y_lower": y_lower_final.tolist(),
+            },
+            "initial_shape": {
+                "cst_upper": config.cst_upper,
+                "cst_lower": config.cst_lower,
+            },
+        }
+        await ws.send_json(final_payload)
+        
+        _OPT_RESULTS[session_id] = final_payload
 
         print(f"[optimize] Session {config.session_id}: optimization complete")
         await ws.close()
@@ -555,4 +560,86 @@ async def stream_optimization(ws: WebSocket, session_id: str):
                 )
             except Exception as e:
                 print(f"Failed to auto-save optimization metrics for session {session_id}: {e}")
+
+@router.get("/sessions/{session_id}/result")
+def get_optimization_result(session_id: str, user: dict = Depends(get_current_user)):
+    """Get the optimization result from cache or db."""
+    user_id = user.get("uid")
+
+    if session_id in _OPT_RESULTS:
+        # We could check ownership here if cache has user_id, but skipping for simplicity
+        # or checking the config:
+        config = _OPT_SESSIONS.get(session_id)
+        if config and config.user_id != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized to access this session")
+        return _OPT_RESULTS[session_id]
+
+    repo = get_storage_repository()
+
+    # Verify this is an optimization session
+    session_record = repo.get_session(session_id)
+    if not session_record:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session_record.session_type != "optimize":
+        raise HTTPException(status_code=400, detail="This session is not an optimization session")
+
+    airfoil = repo.get_latest_airfoil(session_id, is_optimized=True)
+    if not airfoil:
+        raise HTTPException(status_code=404, detail="Optimization result not found for this session")
+
+    if str(airfoil.created_by_user_id) != str(user_id):
+        raise HTTPException(status_code=403, detail="Not authorized to access this session")
+
+    cst = repo.get_cst(airfoil.cst_id)
+    if not cst:
+        raise HTTPException(status_code=404, detail="CST data not found")
+
+    final_upper = jnp.array(cst.weights_upper)
+    final_lower = jnp.array(cst.weights_lower)
+    
+    num_cst_points = 100
+    config = _OPT_SESSIONS.get(session_id)
+    if config:
+        num_cst_points = config.num_cst_points
+        initial_upper = config.cst_upper
+        initial_lower = config.cst_lower
+        total_iterations = config.num_iterations
+    else:
+        initial_upper = cst.weights_upper
+        initial_lower = cst.weights_lower
+        total_iterations = 0
+
+    x_final, y_upper_final, y_lower_final = generate_cst_coords(
+        final_upper, final_lower, num_points=num_cst_points
+    )
+
+    cl_cd = airfoil.cl / airfoil.cd if airfoil.cd and abs(airfoil.cd) > 1e-12 else 0.0
+
+    final_payload = {
+        "type": "complete",
+        "meta": {
+            "total_iterations": total_iterations,
+            "final_cl": airfoil.cl,
+            "final_cd": airfoil.cd,
+            "final_cl_cd": cl_cd,
+            "final_drag": airfoil.drag,
+            "final_loss": 0.0,
+        },
+        "shape": {
+            "cst_upper": cst.weights_upper,
+            "cst_lower": cst.weights_lower,
+            "airfoil_x": x_final.tolist(),
+            "airfoil_y_upper": y_upper_final.tolist(),
+            "airfoil_y_lower": y_lower_final.tolist(),
+        },
+        "initial_shape": {
+            "cst_upper": initial_upper,
+            "cst_lower": initial_lower,
+        },
+    }
+    
+    _OPT_RESULTS[session_id] = final_payload
+    return final_payload
+
 

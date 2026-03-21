@@ -131,6 +131,86 @@ curl -X POST http://localhost:8000/optimize/sessions/{session_id}/save \
    }'
 ```
 
+## Get simulation result (by session ID)
+
+Returns the final simulation result (from cache or database) without re-running
+the simulation. Requires the session to be of type `simulate`.
+
+```bash
+curl -X GET http://localhost:8000/sessions/{session_id}/result \
+   -H "Authorization: Bearer <FIREBASE_ID_TOKEN>"
+```
+
+**Response** (same JSON shape as the WebSocket stream):
+
+```json
+{
+  "meta": {
+    "session_id": "...",
+    "height": 128,
+    "width": 256,
+    "cell_size": 0.04,
+    "chord_length": 1.0,
+    "airfoil_offset_x": 1.2,
+    "airfoil_offset_y": 2.56,
+    "time": 0.0,
+    "step": 0,
+    "cl": 0.123,
+    "cd": 0.045,
+    "l_d": 2.73
+  },
+  "fields": {
+    "u": [],
+    "v": [],
+    "curl": [],
+    "pressure": [],
+    "solid": [],
+    "tracer": []
+  }
+}
+```
+
+> **Note:** When fetched from the database (not cache), the `fields` arrays are
+> empty because raw grid data is not persisted. The cached version (if the
+> WebSocket ran in this server instance) contains full field data.
+
+## Get optimization result (by session ID)
+
+Returns the final optimization result (from cache or database) without
+re-running the optimization loop. Requires the session to be of type `optimize`.
+
+```bash
+curl -X GET http://localhost:8000/optimize/sessions/{session_id}/result \
+   -H "Authorization: Bearer <FIREBASE_ID_TOKEN>"
+```
+
+**Response** (same JSON shape as the WebSocket `complete` message):
+
+```json
+{
+  "type": "complete",
+  "meta": {
+    "total_iterations": 30,
+    "final_cl": 0.123,
+    "final_cd": 0.045,
+    "final_cl_cd": 2.73,
+    "final_drag": 0.012,
+    "final_loss": 0.0
+  },
+  "shape": {
+    "cst_upper": [0.2, 0.22, 0.2, 0.18, 0.15, 0.12],
+    "cst_lower": [-0.1, -0.08, -0.06, -0.05, -0.04, -0.03],
+    "airfoil_x": [0.0, 0.01, "..."],
+    "airfoil_y_upper": [0.0, 0.05, "..."],
+    "airfoil_y_lower": [0.0, -0.03, "..."]
+  },
+  "initial_shape": {
+    "cst_upper": [0.18, 0.22, 0.20, 0.18, 0.15, 0.12],
+    "cst_lower": [-0.10, -0.08, -0.06, -0.05, -0.04, -0.03]
+  }
+}
+```
+
 # Postgres integration test
 
 Run the Postgres-backed repository test (uses `TURBODIFF_DATABASE_URL`):

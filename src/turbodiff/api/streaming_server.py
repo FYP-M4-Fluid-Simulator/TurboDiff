@@ -10,7 +10,7 @@ from uuid import uuid4
 import jax.numpy as jnp
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Depends
 from pydantic import BaseModel, Field
-from turbodiff.api.auth import get_current_user
+from turbodiff.api.auth import get_current_user, verify_websocket_token
 
 from turbodiff.core.airfoil_optimization import (
     compute_grid_coordinates,
@@ -45,6 +45,8 @@ CELL_SIZE_MAP: Dict[str, float] = {
 
 router = APIRouter()
 _SESSIONS: Dict[str, "SessionConfig"] = {}
+_SIMULATION_RESULTS: Dict[str, dict] = {}
+
 
 
 class SessionRequest(BaseModel):
@@ -226,16 +228,19 @@ def create_session(request: SessionRequest, user: dict = Depends(get_current_use
 
 @router.websocket("/ws/{session_id}")
 async def stream_state(ws: WebSocket, session_id: str):
-    user = ws.state.user
+    await ws.accept()
 
-    config = _SESSIONS.get(session_id)
-    if config is None:
-        await ws.accept()
-        await ws.send_json({"error": "unknown session_id"})
+    user = await verify_websocket_token(ws)
+    if user is None:
+        await ws.send_json({"error": "Missing or invalid authentication token"})
         await ws.close(code=1008)
         return
 
-    await ws.accept()
+    config = _SESSIONS.get(session_id)
+    if config is None:
+        await ws.send_json({"error": "unknown session_id"})
+        await ws.close(code=1008)
+        return
 
     if config.cst_upper is None or config.cst_lower is None:
         await ws.send_json({"error": "Missing weights in session config"})
@@ -386,6 +391,7 @@ async def stream_state(ws: WebSocket, session_id: str):
                     },
                 }
                 await ws.send_json(payload)
+                _SIMULATION_RESULTS[session_id] = payload
 
             if config.stream_fps > 0:
                 await asyncio.sleep(1.0 / config.stream_fps)
@@ -416,4 +422,84 @@ async def stream_state(ws: WebSocket, session_id: str):
                 )
             except Exception as e:
                 print(f"Failed to auto-save simulation metrics for session {session_id}: {e}")
+
+@router.get("/sessions/{session_id}/result")
+def get_simulation_result(session_id: str, user: dict = Depends(get_current_user)):
+    """Get the simulation result from cache or db."""
+    user_id = user.get("uid")
+
+    # 1. Check in-memory cache first
+    if session_id in _SIMULATION_RESULTS:
+        config = _SESSIONS.get(session_id)
+        if config and config.user_id != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized to access this session")
+        return _SIMULATION_RESULTS[session_id]
+
+    # 2. Fallback to database
+    repo = get_storage_repository()
+
+    session_record = repo.get_session(session_id)
+    if not session_record:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session_record.session_type != "simulate":
+        raise HTTPException(status_code=400, detail="This session is not a simulation session")
+
+    airfoil = repo.get_latest_airfoil(session_id, is_optimized=False)
+    if not airfoil:
+        raise HTTPException(status_code=404, detail="Simulation result not found for this session")
+
+    if str(airfoil.created_by_user_id) != str(user_id):
+        raise HTTPException(status_code=403, detail="Not authorized to access this session")
+
+    # 3. Resolve grid parameters: prefer in-memory config, fallback to DB session parameters
+    config = _SESSIONS.get(session_id)
+    if config:
+        height = config.height
+        width = config.width
+        cell_size = config.cell_size
+        chord_length = config.chord_length
+        airfoil_offset_x = config.airfoil_offset_x
+        airfoil_offset_y = config.airfoil_offset_y
+    else:
+        # Server was restarted — extract from the stored session parameters
+        resolved = (session_record.parameters or {}).get("resolved", {})
+        height = resolved.get("height", 0)
+        width = resolved.get("width", 0)
+        cell_size = resolved.get("cell_size", 0.0)
+        chord_length = resolved.get("chord_length", 0.0)
+        airfoil_offset_x = resolved.get("airfoil_offset_x", 0.0)
+        airfoil_offset_y = resolved.get("airfoil_offset_y", 0.0)
+
+    cl = airfoil.cl if airfoil.cl is not None else 0.0
+    cd = airfoil.cd if airfoil.cd is not None else 0.0
+    l_d = cl / cd if abs(cd) > 1e-9 else 0.0
+
+    payload = {
+        "meta": {
+            "session_id": session_id,
+            "height": height,
+            "width": width,
+            "cell_size": cell_size,
+            "chord_length": chord_length,
+            "airfoil_offset_x": airfoil_offset_x,
+            "airfoil_offset_y": airfoil_offset_y,
+            "time": 0.0,
+            "step": 0,
+            "cl": cl,
+            "cd": cd,
+            "l_d": l_d,
+        },
+        "fields": {
+            "u": [],
+            "v": [],
+            "curl": [],
+            "pressure": [],
+            "solid": [],
+            "tracer": [],
+        },
+    }
+
+    _SIMULATION_RESULTS[session_id] = payload
+    print("Payload of   session " + session_id + " is: ", payload)
+    return payload
 
