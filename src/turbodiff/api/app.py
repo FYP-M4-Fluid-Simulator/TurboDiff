@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, Tuple
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from turbodiff.api import (
@@ -10,7 +10,7 @@ from turbodiff.api import (
     cst_routes,
     optimization_server,
 )
-from turbodiff.api.auth import get_current_user
+
 from turbodiff.db.storage import configure_storage_from_env
 
 FIDELITY_MAP: Dict[str, Tuple[int, int]] = {
@@ -21,7 +21,6 @@ FIDELITY_MAP: Dict[str, Tuple[int, int]] = {
 
 app = FastAPI(
     title="TurboDiff Streaming API",
-    dependencies=[Depends(get_current_user)]
 )
 
 

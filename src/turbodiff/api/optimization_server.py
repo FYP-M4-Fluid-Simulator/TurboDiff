@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Depends
 from pydantic import BaseModel, Field
-from turbodiff.api.auth import get_current_user
+from turbodiff.api.auth import get_current_user, verify_websocket_token
 
 from turbodiff.core.airfoil import generate_cst_coords, thickness_at_x
 from turbodiff.core.airfoil_optimization import (
@@ -387,16 +387,19 @@ def _run_iteration(params, compute_loss_with_aux, grad_fn, config):
 @router.websocket("/ws/{session_id}")
 async def stream_optimization(ws: WebSocket, session_id: str):
     """Run airfoil optimization and stream each iteration's results."""
-    user = ws.state.user
+    await ws.accept()
 
-    config = _OPT_SESSIONS.get(session_id)
-    if config is None:
-        await ws.accept()
-        await ws.send_json({"error": "unknown session_id"})
+    user = await verify_websocket_token(ws)
+    if user is None:
+        await ws.send_json({"error": "Missing or invalid authentication token"})
         await ws.close(code=1008)
         return
 
-    await ws.accept()
+    config = _OPT_SESSIONS.get(session_id)
+    if config is None:
+        await ws.send_json({"error": "unknown session_id"})
+        await ws.close(code=1008)
+        return
 
     # Build functions (fast — no actual computation yet)
     n_weights, compute_loss_with_aux, grad_fn = _build_optimization_fns(config)
@@ -585,7 +588,7 @@ def get_optimization_result(session_id: str, user: dict = Depends(get_current_us
     if not airfoil:
         raise HTTPException(status_code=404, detail="Optimization result not found for this session")
 
-    if airfoil.created_by_user_id != user_id:
+    if str(airfoil.created_by_user_id) != str(user_id):
         raise HTTPException(status_code=403, detail="Not authorized to access this session")
 
     cst = repo.get_cst(airfoil.cst_id)

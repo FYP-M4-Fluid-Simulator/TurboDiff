@@ -54,3 +54,29 @@ async def get_current_user(
             detail=f"Invalid authentication credentials: {str(e)}",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+async def verify_websocket_token(websocket) -> Optional[dict]:
+    """
+    Manually verify a Firebase JWT token for WebSocket connections.
+    Extracts the token from query params (?token=...) or the Authorization header.
+    Returns the decoded token dict on success, or None on failure.
+    """
+    token = websocket.query_params.get("token")
+
+    if not token:
+        authorization = websocket.headers.get("Authorization")
+        if authorization:
+            scheme, auth_cred = get_authorization_scheme_param(authorization)
+            if scheme.lower() == "bearer":
+                token = auth_cred
+
+    if not token:
+        return None
+
+    try:
+        decoded_token = auth.verify_id_token(token)
+        websocket.state.user = decoded_token
+        return decoded_token
+    except Exception:
+        return None
