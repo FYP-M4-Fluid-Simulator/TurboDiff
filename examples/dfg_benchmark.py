@@ -226,7 +226,7 @@ def main():
     )
     print(f"JIT Compilation took {time.time() - start_time:.2f} seconds")
 
-    while step <= 15000:
+    while step <= 5000:
         state = step_turek(sim, state)
 
         if step % 50 == 0 and step > 0:
@@ -247,17 +247,17 @@ def main():
 
             if step > 1000 and deltaCd < 1e-6:
                 print("\nSteady state reached!")
-                print(f"Final Cd = {Cd:.5f}")
-                print(f"Final Cl = {Cl:.5f}")
-                print("Benchmark reference Cd = 5.5795")
-                print(
-                    f"Diff                   = {abs(Cd - 5.5795):.5f} = {abs(Cd - 5.5795) / 5.5795 * 100:.2f}%"
-                )
                 break
 
             Cd_prev = Cd
 
         step += 1
+    print(f"Final Cd = {Cd:.5f}")
+    print(f"Final Cl = {Cl:.5f}")
+    print("Benchmark reference Cd = 5.5795")
+    print(
+        f"Diff                   = {abs(Cd - 5.5795):.5f} = {abs(Cd - 5.5795) / 5.5795 * 100:.2f}%"
+    )
 
     print("Simulation finished.")
 

@@ -80,7 +80,8 @@ class FluidGrid:
         cell_size: Physical size of each cell in meters
         dt: Time step in seconds
         diffusion: Diffusion coefficient
-        viscosity: Viscosity coefficient (not yet implemented)
+        viscosity: Kinematic viscosity coefficient (m²/s)
+        rho: Fluid density (kg/m³), default 1.0
         boundary_type: 0 -> No Boundary, 1 -> Complete Boundary, 2 -> No right boundary
         sdf: Optional signed distance function for obstacles
     """
@@ -93,6 +94,7 @@ class FluidGrid:
         dt: float,
         diffusion: float = 0.001,
         viscosity: float = 0.0,
+        rho: float = 1.0,
         boundary_type: int = 1,
         sdf: Optional[Callable[[Array, Array], Array]] = None,
         visualise: bool = False,
@@ -107,6 +109,7 @@ class FluidGrid:
         self.dt = dt
         self.diffusion = diffusion
         self.viscosity = viscosity
+        self.rho = rho
 
         # Visualization settings
         self.visualise = visualise
@@ -215,7 +218,7 @@ class FluidGrid:
         )
 
     @jax.jit
-    def diffuse_density(self, state: FluidState, num_iters: int = 20) -> FluidState:
+    def diffuse_density(self, state: FluidState, num_iters: int = 50) -> FluidState:
         """
         Perform Gauss–Seidel diffusion on the density field in a JAX-friendly way.
 
@@ -290,10 +293,10 @@ class FluidGrid:
     @jax.jit
     def advect_density(self, state: FluidState) -> FluidState:
         """
-        Advect density using semi-Lagrangian method.
+        Advect density using semi-Lagrangian method with RK2 (midpoint) tracing.
 
-        Traces particles backward through velocity field and
-        interpolates density values.
+        Uses a two-stage Runge-Kutta backward trace to halve the truncation
+        error compared to 1st-order Euler, reducing numerical diffusion.
 
         Args:
             state: Current simulation state
@@ -313,27 +316,34 @@ class FluidGrid:
         x = j_grid + 0.5
         y = i_grid + 0.5
 
-        # Sample velocity at cell centers
-        u_sampled = bilinear_interpolate(
-            state.velocity.u, x, y - 0.5, width + 1, height
+        # ── Stage 1: sample velocity at current positions ─────────────────────
+        u1 = bilinear_interpolate(state.velocity.u, x, y - 0.5, width + 1, height)
+        v1 = bilinear_interpolate(state.velocity.v, x - 0.5, y, width, height + 1)
+
+        # Half-step backward to midpoint
+        x_mid = x - 0.5 * dt0 * u1
+        y_mid = y - 0.5 * dt0 * v1
+
+        # ── Stage 2: sample velocity at midpoint ──────────────────────────────
+        u2 = bilinear_interpolate(
+            state.velocity.u, x_mid, y_mid - 0.5, width + 1, height
         )
-        v_sampled = bilinear_interpolate(
-            state.velocity.v, x - 0.5, y, width, height + 1
+        v2 = bilinear_interpolate(
+            state.velocity.v, x_mid - 0.5, y_mid, width, height + 1
         )
 
-        # Backward trace
-        x_back = x - dt0 * u_sampled
-        y_back = y - dt0 * v_sampled
+        # Full-step backward using midpoint velocity
+        x_back = x - dt0 * u2
+        y_back = y - dt0 * v2
 
         # Clamp to valid range
         x_back = jnp.clip(x_back, 0.5, width - 0.5)
         y_back = jnp.clip(y_back, 0.5, height - 0.5)
 
-        # Sample density at traced-back positions (adjust for 0-indexed)
+        # Sample density at traced-back positions
         x_back_adj = x_back - 0.5
         y_back_adj = y_back - 0.5
 
-        # Interpolate density
         new_density_interior = bilinear_interpolate(
             state.density.values, x_back_adj, y_back_adj, width, height
         )
@@ -354,7 +364,10 @@ class FluidGrid:
     @jax.jit
     def advect_velocity(self, state: FluidState) -> FluidState:
         """
-        Advect velocity field (self-advection).
+        Advect velocity field (self-advection) using RK2 (midpoint) tracing.
+
+        Uses a two-stage Runge-Kutta backward trace for both u and v components,
+        halving the truncation error versus 1st-order Euler.
 
         Args:
             state: Current simulation state
@@ -365,56 +378,67 @@ class FluidGrid:
         height, width = self.resolution
         dt0 = self.dt / self.cell_size
 
-        # Advect u-velocities (at vertical faces)
+        # ── Advect u-velocities (at vertical faces) ───────────────────────────
         i_u, j_u = jnp.meshgrid(
             jnp.arange(height), jnp.arange(width + 1), indexing="ij"
         )
         x_u = j_u.astype(float)
         y_u = i_u.astype(float) + 0.5
 
-        # Sample velocity at u positions
-        u_at_u = bilinear_interpolate(
-            state.velocity.u, x_u, y_u - 0.5, width + 1, height
+        # Stage 1: velocity at u-face positions
+        u1_u = bilinear_interpolate(state.velocity.u, x_u, y_u - 0.5, width + 1, height)
+        v1_u = bilinear_interpolate(state.velocity.v, x_u - 0.5, y_u, width, height + 1)
+
+        # Half-step to midpoint
+        x_u_mid = x_u - 0.5 * dt0 * u1_u
+        y_u_mid = y_u - 0.5 * dt0 * v1_u
+
+        # Stage 2: velocity at midpoint
+        u2_u = bilinear_interpolate(
+            state.velocity.u, x_u_mid, y_u_mid - 0.5, width + 1, height
         )
-        v_at_u = bilinear_interpolate(
-            state.velocity.v, x_u - 0.5, y_u, width, height + 1
+        v2_u = bilinear_interpolate(
+            state.velocity.v, x_u_mid - 0.5, y_u_mid, width, height + 1
         )
 
-        # Backward trace for u (no clamping - let interpolation handle bounds)
-        x_u_back = x_u - dt0 * u_at_u
-        y_u_back = y_u - dt0 * v_at_u
+        # Full-step backward using midpoint velocity
+        x_u_back = x_u - dt0 * u2_u
+        y_u_back = y_u - dt0 * v2_u
 
-        # Sample u at traced positions (bilinear_interpolate handles clamping)
         new_u = bilinear_interpolate(
             state.velocity.u, x_u_back, y_u_back - 0.5, width + 1, height
         )
 
-        # Advect v-velocities (at horizontal faces)
+        # ── Advect v-velocities (at horizontal faces) ─────────────────────────
         i_v, j_v = jnp.meshgrid(
             jnp.arange(height + 1), jnp.arange(width), indexing="ij"
         )
         x_v = j_v.astype(float) + 0.5
         y_v = i_v.astype(float)
 
-        # Sample velocity at v positions
-        u_at_v = bilinear_interpolate(
-            state.velocity.u, x_v, y_v - 0.5, width + 1, height
+        # Stage 1: velocity at v-face positions
+        u1_v = bilinear_interpolate(state.velocity.u, x_v, y_v - 0.5, width + 1, height)
+        v1_v = bilinear_interpolate(state.velocity.v, x_v - 0.5, y_v, width, height + 1)
+
+        # Half-step to midpoint
+        x_v_mid = x_v - 0.5 * dt0 * u1_v
+        y_v_mid = y_v - 0.5 * dt0 * v1_v
+
+        # Stage 2: velocity at midpoint
+        u2_v = bilinear_interpolate(
+            state.velocity.u, x_v_mid, y_v_mid - 0.5, width + 1, height
         )
-        v_at_v = bilinear_interpolate(
-            state.velocity.v, x_v - 0.5, y_v, width, height + 1
+        v2_v = bilinear_interpolate(
+            state.velocity.v, x_v_mid - 0.5, y_v_mid, width, height + 1
         )
 
-        # Backward trace for v (no clamping - let interpolation handle bounds)
-        x_v_back = x_v - dt0 * u_at_v
-        y_v_back = y_v - dt0 * v_at_v
+        # Full-step backward using midpoint velocity
+        x_v_back = x_v - dt0 * u2_v
+        y_v_back = y_v - dt0 * v2_v
 
-        # Sample v at traced positions (bilinear_interpolate handles clamping)
         new_v = bilinear_interpolate(
             state.velocity.v, x_v_back - 0.5, y_v_back, width, height + 1
         )
-
-        # Apply solid boundary conditions
-        # new_u, new_v = apply_zero_velocity_at_solids(new_u, new_v, state.solid_mask)
 
         return state.__class__(
             density=state.density,
@@ -427,7 +451,7 @@ class FluidGrid:
         )
 
     @jax.jit
-    def diffuse_velocity(self, state: FluidState, num_iters: int = 20) -> FluidState:
+    def diffuse_velocity(self, state: FluidState, num_iters: int = 50) -> FluidState:
         """
         Perform Gauss–Seidel diffusion on the velocity field (implicit viscosity).
         Should be applied before advection/projection.
@@ -584,7 +608,7 @@ class FluidGrid:
         return div
 
     @jax.jit
-    def solve_pressure(self, state: FluidState, num_iters: int = 30) -> FluidState:
+    def solve_pressure(self, state: FluidState, num_iters: int = 80) -> FluidState:
         """
         Solve for pressure using Gauss-Seidel iterations.
 
@@ -603,7 +627,7 @@ class FluidGrid:
         # Compute fluid fraction (1.0 = fully fluid, 0.0 = fully solid)
         fluid_fraction = 1.0 - solid
         pressure = jnp.zeros((self.height, self.width))
-        scale = self.cell_size * self.cell_size / self.dt
+        scale = self.rho * self.cell_size * self.cell_size / self.dt
 
         @jax.jit
         def gs_iteration(p_div):
