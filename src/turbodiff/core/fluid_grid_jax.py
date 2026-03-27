@@ -50,6 +50,8 @@ class FluidState:
         pressure: Pressure field, Grid
         solid_mask: Boolean mask for solid cells, Array (height, width)
         sources: Array of source strengths, same shape as density
+        nu_tilde: Modified eddy viscosity field for Spalart-Allmaras model (Grid),
+                  or None when turbulence model is disabled.
         time: Current simulation time
         step: Current step number
     """
@@ -59,6 +61,7 @@ class FluidState:
     pressure: Grid
     solid_mask: Array
     sources: Array
+    nu_tilde: Optional[Grid] = None
     time: float = 0.0
     step: int = 0
 
@@ -101,6 +104,7 @@ class FluidGrid:
         show_cell_property: str = "density",
         show_velocity: bool = False,
         show_cell_centered_velocity: bool = False,
+        use_sa_turbulence: bool = False,
     ):
         self.height = height
         self.width = width
@@ -110,6 +114,23 @@ class FluidGrid:
         self.diffusion = diffusion
         self.viscosity = viscosity
         self.rho = rho
+
+        # ── Spalart-Allmaras turbulence model ─────────────────────────────────
+        self.use_sa_turbulence = use_sa_turbulence
+        # SA-1994 model constants
+        self.sa_cb1 = 0.1355
+        self.sa_cb2 = 0.622
+        self.sa_sigma = 2.0 / 3.0
+        self.sa_kappa = 0.41
+        self.sa_cw2 = 0.3
+        self.sa_cw3 = 2.0
+        self.sa_cv1 = 7.1
+        # Derived constant: cw1 = cb1/κ² + (1+cb2)/σ
+        self.sa_cw1 = (
+            self.sa_cb1 / (self.sa_kappa**2) + (1.0 + self.sa_cb2) / self.sa_sigma
+        )
+        # Wall-distance cache (set in _compute_wall_distance after solid_mask is known)
+        self._wall_dist: Optional[Array] = None
 
         # Visualization settings
         self.visualise = visualise
@@ -126,6 +147,10 @@ class FluidGrid:
         self.solid_mask = create_solid_mask(
             self.resolution, boundary=boundary_type, sdf_fn=sdf
         )
+
+        # Pre-compute wall distance for SA model
+        if self.use_sa_turbulence:
+            self._wall_dist = self._compute_wall_distance(self.solid_mask)
 
         # Initialize pygame if needed
         if self.visualise:
@@ -185,14 +210,281 @@ class FluidGrid:
         if sources is None:
             sources = jnp.zeros((self.height, self.width))
 
+        # Initialize SA modified eddy viscosity (ν̃) if turbulence model is active.
+        # Seeded at 5ν in fluid cells, 0 in solids — a common SA initialisation.
+        nu_tilde: Optional[Grid] = None
+        if self.use_sa_turbulence:
+            nu_init = jnp.where(
+                self.solid_mask > 0.5,
+                0.0,
+                5.0 * self.viscosity,
+            )
+            nu_tilde = Grid.from_array(nu_init, self.cell_size)
+
         return FluidState(
             density=density,
             velocity=velocity,
             pressure=pressure,
             solid_mask=self.solid_mask,
             sources=sources,
+            nu_tilde=nu_tilde,
             time=0.0,
             step=0,
+        )
+
+    # ============================================================================
+    # Spalart-Allmaras (SA-1994) Turbulence Model
+    # ============================================================================
+
+    def _compute_wall_distance(self, solid_mask: Array) -> Array:
+        """
+        Compute the Euclidean distance from every cell centre to the nearest
+        solid cell centre.  The result is a pure JAX array so that gradients
+        can flow through it if needed.
+
+        Strategy: iterate over *solid* cell indices (typically O(1 000) for an
+        airfoil) and take the pixelwise minimum, giving O(N·S) cost instead of
+        the O(N²) all-pairs approach.
+
+        Args:
+            solid_mask: float array (height, width), values in [0, 1]
+
+        Returns:
+            wall_dist: float array (height, width) — physical distance in metres
+        """
+        h, w = self.height, self.width
+        cs = self.cell_size
+
+        # Cell-centre coordinates (grid units)
+        i_grid, j_grid = jnp.meshgrid(
+            jnp.arange(h, dtype=jnp.float32),
+            jnp.arange(w, dtype=jnp.float32),
+            indexing="ij",
+        )  # (h, w)
+
+        # Solid cell centres — use the mask as a soft weight; treat cells with
+        # solid_mask >= 0.5 as walls.  We collect ALL solid cells and use
+        # vmap for a fully differentiable, JIT-friendly computation.
+        solid_float = (solid_mask >= 0.5).astype(jnp.float32)
+
+        # We vectorise over every solid cell by scanning row-major.
+        # For small S this is fast; for large grids with many solid cells use
+        # a sub-sampled boundary list instead.
+        def body(carry, idx):
+            dist_min = carry  # (h, w)
+            si = idx // w
+            sj = idx % w
+            is_solid = solid_float[si, sj]
+            d = jnp.sqrt((i_grid - si) ** 2 + (j_grid - sj) ** 2)
+            # Only update where this cell is actually solid
+            dist_min = jnp.where(is_solid > 0.5, jnp.minimum(dist_min, d), dist_min)
+            return dist_min, None
+
+        total_cells = h * w
+        dist_init = jnp.full((h, w), fill_value=1e6, dtype=jnp.float32)
+        wall_dist_grid, _ = jax.lax.scan(body, dist_init, jnp.arange(total_cells))
+        # Convert from grid units to physical metres, clamp to small positive
+        wall_dist_phys = jnp.maximum(wall_dist_grid * cs, 1e-10)
+        return wall_dist_phys
+
+    @jax.jit
+    def compute_effective_viscosity(self, state: FluidState) -> Array:
+        """
+        Compute the effective (laminar + turbulent) kinematic viscosity field
+        from the SA modified eddy viscosity ν̃.
+
+        The SA f_v1 damping function reads:
+            χ     = ν̃ / ν
+            f_v1  = χ³ / (χ³ + cv1³)
+            ν_t   = ν̃ · f_v1
+            ν_eff = ν  + ν_t
+
+        All operations are pure jnp — fully differentiable.
+
+        Returns:
+            nu_eff: Array (height, width) in m²/s
+        """
+        nu = self.viscosity
+        cv1 = self.sa_cv1
+
+        nu_tilde = state.nu_tilde.values  # (h, w)
+        # Clamp ν̃ to non-negative to avoid spurious negatives
+        nu_tilde = jnp.maximum(nu_tilde, 0.0)
+
+        chi = nu_tilde / (nu + 1e-30)  # χ = ν̃/ν
+        chi3 = chi**3
+        fv1 = chi3 / (chi3 + cv1**3)  # damping function
+
+        nu_t = nu_tilde * fv1  # turbulent eddy viscosity
+        nu_eff = nu + nu_t  # effective viscosity
+        return nu_eff
+
+    @jax.jit(static_argnames=("num_diff_iters",))
+    def step_sa_turbulence(
+        self,
+        state: FluidState,
+        wall_dist: Array,
+        num_diff_iters: int = 4,
+    ) -> FluidState:
+        """
+        Advance the SA modified eddy viscosity field ν̃ by one time step.
+
+        The SA transport equation (Spalart & Allmaras 1994):
+            Dν̃/Dt = cb1*(1-ft2)*S̃*ν̃                       [production]
+                   + (1/σ)*∇·((ν+ν̃)∇ν̃) + (cb2/σ)*|∇ν̃|²  [diffusion]
+                   - (cw1*fw - cb1/κ²*ft2)*(ν̃/d)²          [destruction]
+
+        Simplified SA (ft2=0, fw≈1 for moderate flows) implemented here:
+            Dν̃/Dt ≈ cb1*Ω*ν̃ + (1/σ)*∇·((ν+ν̃)∇ν̃) - cw1*(ν̃/d)²
+
+        All operations are pure jnp:
+        - Semi-Lagrangian RK2 advection of ν̃
+        - Explicit production/destruction source step
+        - Gauss-Seidel diffusion with spatially varying ν+ν̃
+
+        Gradients w.r.t. state.nu_tilde and state.velocity flow correctly
+        through every jnp operation.
+
+        Args:
+            state:          Current FluidState (requires nu_tilde != None)
+            wall_dist:      Pre-computed wall distance array (h, w)
+            num_diff_iters: Gauss-Seidel diffusion iterations
+
+        Returns:
+            New FluidState with updated nu_tilde
+        """
+        height, width = self.resolution
+        dt = self.dt
+        h = self.cell_size
+        nu = self.viscosity
+
+        cb1 = self.sa_cb1
+        cb2 = self.sa_cb2
+        sigma = self.sa_sigma
+        cw1 = self.sa_cw1
+
+        nu_tilde = jnp.maximum(state.nu_tilde.values, 0.0)  # (h, w)
+        fluid_mask = 1.0 - state.solid_mask  # 1 in fluid, 0 in solid
+
+        # ── 1. RK2 semi-Lagrangian advection of ν̃ ─────────────────────────────
+        dt0 = dt / h
+        i_grid, j_grid = jnp.meshgrid(
+            jnp.arange(1, height - 1, dtype=jnp.float32),
+            jnp.arange(1, width - 1, dtype=jnp.float32),
+            indexing="ij",
+        )
+        x = j_grid + 0.5
+        y = i_grid + 0.5
+
+        # Stage 1: velocity at current positions
+        u1 = bilinear_interpolate(state.velocity.u, x, y - 0.5, width + 1, height)
+        v1 = bilinear_interpolate(state.velocity.v, x - 0.5, y, width, height + 1)
+        x_mid = x - 0.5 * dt0 * u1
+        y_mid = y - 0.5 * dt0 * v1
+
+        # Stage 2: velocity at midpoint
+        u2 = bilinear_interpolate(
+            state.velocity.u, x_mid, y_mid - 0.5, width + 1, height
+        )
+        v2 = bilinear_interpolate(
+            state.velocity.v, x_mid - 0.5, y_mid, width, height + 1
+        )
+        x_back = x - dt0 * u2
+        y_back = y - dt0 * v2
+
+        # Clamp & sample
+        x_back = jnp.clip(x_back, 0.5, width - 0.5)
+        y_back = jnp.clip(y_back, 0.5, height - 0.5)
+        nut_adv_interior = bilinear_interpolate(
+            nu_tilde, x_back - 0.5, y_back - 0.5, width, height
+        )
+        nu_tilde = nu_tilde.at[1:-1, 1:-1].set(nut_adv_interior)
+
+        # ── 2. Compute vorticity magnitude Ω = |∂v/∂x − ∂u/∂y| ───────────────
+        # Use cell-centred finite differences on staggered fields.
+        # v at cell centres (approximate via face average)
+        v_cc = 0.5 * (state.velocity.v[:-1, :] + state.velocity.v[1:, :])  # (h, w)
+        u_cc = 0.5 * (state.velocity.u[:, :-1] + state.velocity.u[:, 1:])  # (h, w)
+
+        # Interior gradients only (avoid boundary artefacts)
+        dvdx = jnp.zeros((height, width))
+        dudy = jnp.zeros((height, width))
+        dvdx = dvdx.at[1:-1, 1:-1].set((v_cc[1:-1, 2:] - v_cc[1:-1, :-2]) / (2.0 * h))
+        dudy = dudy.at[1:-1, 1:-1].set((u_cc[2:, 1:-1] - u_cc[:-2, 1:-1]) / (2.0 * h))
+        omega = jnp.abs(dvdx - dudy)  # vorticity magnitude Ω
+
+        # ── 3. Production and destruction (explicit Euler on source) ────────────
+        d = wall_dist  # (h, w)
+        chi = nu_tilde / (nu + 1e-30)
+        chi3 = chi**3
+        fv1 = chi3 / (chi3 + self.sa_cv1**3)
+        fv2 = 1.0 - chi / (1.0 + chi * fv1)
+
+        # Modified strain rate: S̃ = Ω + ν̃/(κ²d²)*f_v2
+        kappa2 = self.sa_kappa**2
+        S_tilde = jnp.maximum(
+            omega + nu_tilde / (kappa2 * d**2 + 1e-30) * fv2,
+            0.0,
+        )
+
+        production = cb1 * S_tilde * nu_tilde
+        destruction = cw1 * (nu_tilde / (d + 1e-30)) ** 2
+
+        # |∇ν̃|² cross-diffusion term  (cb2/σ)*|∇ν̃|²
+        dntdx = jnp.zeros((height, width))
+        dntdy = jnp.zeros((height, width))
+        dntdx = dntdx.at[1:-1, 1:-1].set(
+            (nu_tilde[1:-1, 2:] - nu_tilde[1:-1, :-2]) / (2.0 * h)
+        )
+        dntdy = dntdy.at[1:-1, 1:-1].set(
+            (nu_tilde[2:, 1:-1] - nu_tilde[:-2, 1:-1]) / (2.0 * h)
+        )
+        cross_diff = (cb2 / sigma) * (dntdx**2 + dntdy**2)
+
+        source = (production - destruction + cross_diff) * fluid_mask
+        nu_tilde = nu_tilde + dt * source
+        nu_tilde = jnp.maximum(nu_tilde, 0.0)  # ν̃ must stay non-negative
+
+        # ── 4. Gauss-Seidel diffusion of ν̃ ────────────────────────────────────
+        # Effective diffusivity: (ν + ν̃) / σ  — spatially varying.
+        nu_tilde_0 = nu_tilde  # save for RHS
+
+        def gs_nut(carry, _):
+            nt, nt0 = carry
+            # Spatially varying diffusion factor at each cell
+            a_field = dt * (nu + nt) / (sigma * h * h)  # (h, w)
+            a_c = a_field[1:-1, 1:-1]
+
+            up = nt[:-2, 1:-1]
+            down = nt[2:, 1:-1]
+            left = nt[1:-1, :-2]
+            right = nt[1:-1, 2:]
+
+            # Implicit (Jacobi-style) update
+            new_c = (nt0[1:-1, 1:-1] + a_c * (up + down + left + right)) / (
+                1.0 + 4.0 * a_c
+            )
+            # Zero ν̃ in solid cells
+            mask_c = fluid_mask[1:-1, 1:-1]
+            new_c = mask_c * new_c + (1.0 - mask_c) * nt[1:-1, 1:-1]
+            return (nt.at[1:-1, 1:-1].set(new_c), nt0), None
+
+        (nu_tilde, _), _ = jax.lax.scan(
+            gs_nut, (nu_tilde, nu_tilde_0), None, length=num_diff_iters
+        )
+
+        # Enforce zero ν̃ in solid cells
+        nu_tilde = nu_tilde * fluid_mask
+
+        return state.__class__(
+            density=state.density,
+            velocity=state.velocity,
+            pressure=state.pressure,
+            solid_mask=state.solid_mask,
+            sources=state.sources,
+            nu_tilde=state.nu_tilde.with_values(nu_tilde),
+            time=state.time,
+            step=state.step,
         )
 
     @jax.jit
@@ -213,11 +505,12 @@ class FluidGrid:
             pressure=state.pressure,
             solid_mask=state.solid_mask,
             sources=state.sources,
+            nu_tilde=state.nu_tilde,
             time=state.time,
             step=state.step,
         )
 
-    @jax.jit
+    @jax.jit(static_argnames=("num_iters",))
     def diffuse_density(self, state: FluidState, num_iters: int = 50) -> FluidState:
         """
         Perform Gauss–Seidel diffusion on the density field in a JAX-friendly way.
@@ -286,6 +579,7 @@ class FluidGrid:
             pressure=state.pressure,
             solid_mask=state.solid_mask,
             sources=state.sources,
+            nu_tilde=state.nu_tilde,
             time=state.time,
             step=state.step,
         )
@@ -357,6 +651,7 @@ class FluidGrid:
             pressure=state.pressure,
             solid_mask=state.solid_mask,
             sources=state.sources,
+            nu_tilde=state.nu_tilde,
             time=state.time,
             step=state.step,
         )
@@ -446,34 +741,55 @@ class FluidGrid:
             pressure=state.pressure,
             solid_mask=state.solid_mask,
             sources=state.sources,
+            nu_tilde=state.nu_tilde,
             time=state.time,
             step=state.step,
         )
 
-    @jax.jit
-    def diffuse_velocity(self, state: FluidState, num_iters: int = 50) -> FluidState:
+    @jax.jit(static_argnames=("num_iters",))
+    def diffuse_velocity(
+        self,
+        state: FluidState,
+        num_iters: int = 50,
+        nu_eff_field: Optional[Array] = None,
+    ) -> FluidState:
         """
         Perform Gauss–Seidel diffusion on the velocity field (implicit viscosity).
         Should be applied before advection/projection.
+
+        Args:
+            state:         Current simulation state
+            num_iters:     Number of Gauss–Seidel iterations
+            nu_eff_field:  Optional spatially-varying effective kinematic viscosity
+                           (h, w) array in m²/s.  When provided (SA turbulence mode),
+                           each cell uses its local value; otherwise the scalar
+                           self.viscosity is used uniformly.
+                           All paths are pure jnp — fully differentiable.
+
+        Returns:
+            New state with diffused velocity.
         """
-        # Short-circuit if viscosity is 0
-        if self.viscosity <= 0.0:
+        # Short-circuit if no viscosity at all
+        if self.viscosity <= 0.0 and nu_eff_field is None:
             return state
 
         dt = self.dt
         nu = self.viscosity
-        cell_size = self.cell_size
+        cs = self.cell_size
         solid = state.solid_mask
-        a = dt * nu / (cell_size * cell_size)
+        height, width = self.resolution
+
+        # Build spatially-varying diffusion factor a(i,j) = dt * nu_eff(i,j) / h²
+        # If nu_eff_field is None, use scalar nu uniformly (backward compatible).
+        if nu_eff_field is None:
+            a_cc = jnp.full((height, width), dt * nu / (cs * cs))
+        else:
+            a_cc = dt * nu_eff_field / (cs * cs)  # (h, w) — differentiable
 
         u0 = state.velocity.u
         v0 = state.velocity.v
 
-        # We need masks for u-faces and v-faces just like how apply_zero_velocity_at_solids handles it
-        # Actually, let's just do standard interior masking:
-        # u is shape (height, width+1). Interior is [1:-1, 1:-1]
-
-        # Fix array shape expansion
+        # Face masks (zero out velocity adjacent to solid)
         u_interior_mask = jnp.ones_like(u0)
         solid_u_left = solid[:, :-1]
         solid_u_right = solid[:, 1:]
@@ -488,29 +804,38 @@ class FluidGrid:
             (1.0 - jnp.logical_or(solid_v_top, solid_v_bottom)).astype(jnp.float32)
         )
 
-        @jax.jit
-        def gs_u(u_tuple):
-            u, u_init = u_tuple
+        # Diffusion factor interpolated to u / v faces (average of two cell centres)
+        # u-face (i, j): between cell [i, j-1] and [i, j]  → average a_cc cols
+        a_u = jnp.zeros_like(u0)
+        a_u = a_u.at[:, 1:-1].set(0.5 * (a_cc[:, :-1] + a_cc[:, 1:]))  # interior faces
+        a_u = a_u.at[:, 0].set(a_cc[:, 0])  # left boundary
+        a_u = a_u.at[:, -1].set(a_cc[:, -1])  # right boundary
+
+        # v-face (i, j): between cell [i-1, j] and [i, j]  → average a_cc rows
+        a_v = jnp.zeros_like(v0)
+        a_v = a_v.at[1:-1, :].set(0.5 * (a_cc[:-1, :] + a_cc[1:, :]))  # interior faces
+        a_v = a_v.at[0, :].set(a_cc[0, :])  # top boundary
+        a_v = a_v.at[-1, :].set(a_cc[-1, :])  # bottom boundary
+
+        def gs_u(carry, _):
+            u, u_init = carry
+            a = a_u[1:-1, 1:-1]  # (h, w-1) interior
 
             up = u[:-2, 1:-1]
             down = u[2:, 1:-1]
             left = u[1:-1, :-2]
             right = u[1:-1, 2:]
 
-            # Simple boundary check for neighbors (assume solid = 0 velocity)
-            # A more accurate solver would use proper face-masked counts here, but
-            # for stability we can just enforce full neighbor connectivity internally
             neighbors = up + down + left + right
-            new_u_center = (u_init[1:-1, 1:-1] + a * neighbors) / (1.0 + 4.0 * a)
+            new_u_c = (u_init[1:-1, 1:-1] + a * neighbors) / (1.0 + 4.0 * a)
 
             mask = u_interior_mask[1:-1, 1:-1]
-            new_u_center = mask * new_u_center + (1.0 - mask) * u[1:-1, 1:-1]
+            new_u_c = mask * new_u_c + (1.0 - mask) * u[1:-1, 1:-1]
+            return (u.at[1:-1, 1:-1].set(new_u_c), u_init), None
 
-            return (u.at[1:-1, 1:-1].set(new_u_center), u_init)
-
-        @jax.jit
-        def gs_v(v_tuple):
-            v, v_init = v_tuple
+        def gs_v(carry, _):
+            v, v_init = carry
+            a = a_v[1:-1, 1:-1]  # (h-1, w) interior
 
             up = v[:-2, 1:-1]
             down = v[2:, 1:-1]
@@ -518,19 +843,17 @@ class FluidGrid:
             right = v[1:-1, 2:]
 
             neighbors = up + down + left + right
-            new_v_center = (v_init[1:-1, 1:-1] + a * neighbors) / (1.0 + 4.0 * a)
+            new_v_c = (v_init[1:-1, 1:-1] + a * neighbors) / (1.0 + 4.0 * a)
 
             mask = v_interior_mask[1:-1, 1:-1]
-            new_v_center = mask * new_v_center + (1.0 - mask) * v[1:-1, 1:-1]
+            new_v_c = mask * new_v_c + (1.0 - mask) * v[1:-1, 1:-1]
+            return (v.at[1:-1, 1:-1].set(new_v_c), v_init), None
 
-            return (v.at[1:-1, 1:-1].set(new_v_center), v_init)
+        # Use jax.lax.scan (differentiable) instead of fori_loop
+        (u_new, _), _ = jax.lax.scan(gs_u, (u0, u0), None, length=num_iters)
+        (v_new, _), _ = jax.lax.scan(gs_v, (v0, v0), None, length=num_iters)
 
-        # Diffuse U
-        u_new, _ = jax.lax.fori_loop(0, num_iters, lambda _, u_t: gs_u(u_t), (u0, u0))
-        # Diffuse V
-        v_new, _ = jax.lax.fori_loop(0, num_iters, lambda _, v_t: gs_v(v_t), (v0, v0))
-
-        # Enforce exact boundaries correctly using existing utility
+        # Enforce exact solid boundaries
         u_new, v_new = apply_zero_velocity_at_solids(u_new, v_new, state.solid_mask)
 
         return state.__class__(
@@ -539,6 +862,7 @@ class FluidGrid:
             pressure=state.pressure,
             solid_mask=state.solid_mask,
             sources=state.sources,
+            nu_tilde=state.nu_tilde,
             time=state.time,
             step=state.step,
         )
@@ -583,6 +907,7 @@ class FluidGrid:
             pressure=state.pressure,
             solid_mask=state.solid_mask,
             sources=state.sources,
+            nu_tilde=state.nu_tilde,
             time=state.time,
             step=state.step,
         )
@@ -607,7 +932,7 @@ class FluidGrid:
 
         return div
 
-    @jax.jit
+    @jax.jit(static_argnames=("num_iters",))
     def solve_pressure(self, state: FluidState, num_iters: int = 80) -> FluidState:
         """
         Solve for pressure using Gauss-Seidel iterations.
@@ -690,6 +1015,7 @@ class FluidGrid:
             pressure=state.pressure.with_values(pressure),
             solid_mask=state.solid_mask,
             sources=state.sources,
+            nu_tilde=state.nu_tilde,
             time=state.time,
             step=state.step,
         )
@@ -759,6 +1085,7 @@ class FluidGrid:
             pressure=state.pressure,
             solid_mask=state.solid_mask,
             sources=state.sources,
+            nu_tilde=state.nu_tilde,
             time=state.time,
             step=state.step,
         )
@@ -773,13 +1100,16 @@ class FluidGrid:
         1. Add density sources
         2. Diffuse density
         3. Advect density
-        4. Advect velocity
-        5. Inject wind tunnel velocity (if active)
-        6. Solve pressure
-        7. Project velocity (enforce incompressibility)
+        4. [SA] Advance SA turbulence transport (ν̃)
+        5. [SA] Compute effective viscosity  ν_eff = ν + ν_t
+        6. Diffuse velocity  (using ν_eff when SA is active)
+        7. Advect velocity
+        8. Inject wind tunnel velocity (if active)
+        9. Solve pressure
+        10. Project velocity (enforce incompressibility)
 
         Args:
-            state: Current simulation state
+            state: Current simulation state.
                    NOTE: state.solid_mask is used for differentiability.
                    For shape optimization, update state.solid_mask before
                    calling step() to enable gradient flow through shape params.
@@ -792,8 +1122,18 @@ class FluidGrid:
         state = self.diffuse_density(state)
         state = self.advect_density(state)
 
-        # Velocity step
-        state = self.diffuse_velocity(state, num_iters=20)
+        # ── Spalart-Allmaras turbulence step ──────────────────────────────────
+        # Fully differentiable: all SA ops are pure jnp.  The Python-level
+        # `use_sa_turbulence` flag causes JAX to compile two specialised traces
+        # (SA-on / SA-off) — no dynamic branching inside the traced graph.
+        if self.use_sa_turbulence and state.nu_tilde is not None:
+            state = self.step_sa_turbulence(state, self._wall_dist, num_diff_iters=4)
+            nu_eff = self.compute_effective_viscosity(state)
+        else:
+            nu_eff = None
+
+        # Velocity step — pass nu_eff so turbulent diffusion uses ν_eff spatially
+        state = self.diffuse_velocity(state, num_iters=20, nu_eff_field=nu_eff)
         state = self.advect_velocity(state)
 
         # Inject wind tunnel velocity if in wind tunnel mode
@@ -810,6 +1150,7 @@ class FluidGrid:
             pressure=state.pressure,
             solid_mask=state.solid_mask,
             sources=state.sources,
+            nu_tilde=state.nu_tilde,
             time=state.time + self.dt,
             step=state.step + 1,
         )
@@ -916,6 +1257,7 @@ class FluidGrid:
             pressure=state.pressure,
             solid_mask=state.solid_mask,
             sources=state.sources,
+            nu_tilde=state.nu_tilde,
             time=state.time,
             step=state.step,
         )
@@ -1046,6 +1388,7 @@ class FluidGrid:
             pressure=state.pressure,
             solid_mask=state.solid_mask,
             sources=state.sources,
+            nu_tilde=state.nu_tilde,
             time=state.time,
             step=state.step,
         )
@@ -1390,13 +1733,20 @@ class FluidGrid:
 
 
 def _fluid_state_flatten(state):
-    """Flatten FluidState for JAX transformation."""
+    """Flatten FluidState for JAX transformation.
+
+    nu_tilde is an Optional[Grid].  We include it as a leaf so that:
+    1. Gradients flow through ν̃ (differentiable SA model).
+    2. JAX compiles separate traces for SA-on (nu_tilde=Grid) and SA-off
+       (nu_tilde=None), keeping the pytree structure consistent within each.
+    """
     children = (
         state.density,
         state.velocity,
         state.pressure,
         state.solid_mask,
         state.sources,
+        state.nu_tilde,  # Optional[Grid] — None or Grid
         state.time,
         state.step,
     )
@@ -1406,13 +1756,14 @@ def _fluid_state_flatten(state):
 
 def _fluid_state_unflatten(metadata, children):
     """Reconstruct FluidState from flattened representation."""
-    density, velocity, pressure, solid_mask, sources, time, step = children
+    density, velocity, pressure, solid_mask, sources, nu_tilde, time, step = children
     return FluidState(
         density=density,
         velocity=velocity,
         pressure=pressure,
         solid_mask=solid_mask,
         sources=sources,
+        nu_tilde=nu_tilde,
         time=time,
         step=step,
     )
