@@ -27,7 +27,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from turbodiff.core.fluid_grid_jax import FluidGrid, FluidState
-from turbodiff.core.utils import apply_zero_velocity_at_solids
+from turbodiff.core.utils import apply_ibm_continuous_forcing
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Grid / simulation parameters
@@ -124,46 +124,54 @@ def build_solid_mask_naca(
     j_idx = np.arange(width)
     i_idx = np.arange(height)
     jj, ii = np.meshgrid(j_idx, i_idx)  # (H, W)
-    cx = (jj + 0.5) * cell_size  # physical x
-    cy = (ii + 0.5) * cell_size  # physical y
 
-    # For each cell centre, determine if it is inside the airfoil.
-    # Strategy: transform cell to body frame, check chord range and thickness.
-    cx_rel = cx - x0
-    cy_rel = cy - y0
+    # Super-sampling for anti-aliased (continuous) solid mask
+    N_SUB = 4
+    solid_accum = np.zeros((height, width), dtype=np.float32)
 
-    # Rotate INTO body frame (inverse: +aoa)
-    cx_body = cx_rel * cos_a - cy_rel * sin_a  # along chord
-    cy_body = cx_rel * sin_a + cy_rel * cos_a  # perpendicular
+    for sub_i in range(N_SUB):
+        for sub_j in range(N_SUB):
+            # Sub-grid cell centres
+            cx = (jj + (sub_j + 0.5) / N_SUB) * cell_size  # physical x
+            cy = (ii + (sub_i + 0.5) / N_SUB) * cell_size  # physical y
 
-    # Normalised chord position
-    xi = cx_body / chord
+            # Transform cell to body frame
+            cx_rel = cx - x0
+            cy_rel = cy - y0
 
-    # Compute half-thickness at each xi
-    # Vectorised over all cells using numpy
-    xi_c = np.clip(xi, 0.0, 1.0)
-    t0 = 0.12 / 0.2
-    c0, c1, c2, c3, c4 = 0.2969, -0.1260, -0.3516, 0.2843, -0.1015
-    half_t = (
-        chord
-        * t0
-        * (
-            c0 * np.sqrt(np.maximum(xi_c, 0.0))
-            + c1 * xi_c
-            + c2 * xi_c**2
-            + c3 * xi_c**3
-            + c4 * xi_c**4
-        )
-    )
+            # Rotate INTO body frame (inverse: +aoa)
+            cx_body = cx_rel * cos_a - cy_rel * sin_a  # along chord
+            cy_body = cx_rel * sin_a + cy_rel * cos_a  # perpendicular
 
-    # Inside if: 0 ≤ xi ≤ 1  AND  |cy_body| ≤ half_t
-    inside = (xi >= 0.0) & (xi <= 1.0) & (np.abs(cy_body) <= half_t)
+            # Normalised chord position
+            xi = cx_body / chord
 
-    # Also add wall boundary rows
-    solid = inside.astype(np.float32)
-    solid[0, :] = 1.0
-    solid[-1, :] = 1.0
+            # Compute half-thickness at each xi
+            xi_c = np.clip(xi, 0.0, 1.0)
+            t0 = 0.12 / 0.2
+            c0, c1, c2, c3, c4 = 0.2969, -0.1260, -0.3516, 0.2843, -0.1015
+            half_t = (
+                chord
+                * t0
+                * (
+                    c0 * np.sqrt(np.maximum(xi_c, 0.0))
+                    + c1 * xi_c
+                    + c2 * xi_c**2
+                    + c3 * xi_c**3
+                    + c4 * xi_c**4
+                )
+            )
 
+            # Inside if: 0 ≤ xi ≤ 1  AND  |cy_body| ≤ half_t
+            inside = (xi >= 0.0) & (xi <= 1.0) & (np.abs(cy_body) <= half_t)
+            solid_accum += inside.astype(np.float32)
+
+    # Average sub-samples for fractional solid coverage
+    solid = solid_accum / (N_SUB * N_SUB)
+
+    # Top/bottom boundaries use free-slip (symmetry) BCs enforced in the RANS
+    # step, NOT no-slip solid walls. Treating them as solid creates spurious
+    # channel blockage (tunnel interference) that inflates Cd.
     return jnp.array(solid)
 
 
@@ -178,11 +186,72 @@ def inject_uniform_inlet(
     u_inlet: float,
     v_inlet: float,
 ) -> FluidState:
-    """Set uniform inlet velocity at left boundary."""
+    """Set uniform inlet velocity at left boundary (first 2 face columns)."""
     u = state.velocity.u
     v = state.velocity.v
     u = u.at[:, 0:2].set(u_inlet)
-    v = v.at[:, 0:1].set(v_inlet)
+    v = v.at[:, 0:2].set(v_inlet)  # was 0:1 — now consistent with u columns
+    return state.__class__(
+        density=state.density,
+        velocity=state.velocity.with_values(u, v),
+        pressure=state.pressure,
+        solid_mask=state.solid_mask,
+        sources=state.sources,
+        nu_tilde=state.nu_tilde,
+        time=state.time,
+        step=state.step,
+    )
+
+
+@jax.jit
+def apply_slip_top_bottom_bc(state: FluidState) -> FluidState:
+    """
+    Enforce free-slip (symmetry) BCs at the top and bottom domain boundaries.
+
+    - Normal velocity v = 0 at the top (face row 0) and bottom (face row H).
+    - Tangential velocity u satisfies du/dy = 0: copy from the first interior row.
+
+    This replaces the previous solid-wall treatment which caused tunnel
+    interference (blockage) and inflated Cd.
+    """
+    u = state.velocity.u
+    v = state.velocity.v
+
+    # No normal flow through horizontal boundaries
+    v = v.at[0, :].set(0.0)  # top v-face
+    v = v.at[-1, :].set(0.0)  # bottom v-face
+
+    # Zero tangential gradient: copy from first/last interior u-row
+    u = u.at[0, :].set(u[1, :])
+    u = u.at[-1, :].set(u[-2, :])
+
+    return state.__class__(
+        density=state.density,
+        velocity=state.velocity.with_values(u, v),
+        pressure=state.pressure,
+        solid_mask=state.solid_mask,
+        sources=state.sources,
+        nu_tilde=state.nu_tilde,
+        time=state.time,
+        step=state.step,
+    )
+
+
+@jax.jit
+def apply_outflow_bc(state: FluidState) -> FluidState:
+    """
+    Enforce a Neumann (zero-gradient) outflow BC at the right domain boundary.
+
+    Copies velocity from the second-to-last column into the last column so
+    that vortices and wakes can exit cleanly without reflecting pressure waves.
+    """
+    u = state.velocity.u
+    v = state.velocity.v
+
+    # du/dx = dv/dx = 0 at the right boundary
+    u = u.at[:, -1].set(u[:, -2])
+    v = v.at[:, -1].set(v[:, -2])
+
     return state.__class__(
         density=state.density,
         velocity=state.velocity.with_values(u, v),
@@ -218,8 +287,11 @@ def make_rans_step(grid: FluidGrid, u_inlet: float, v_inlet: float):
         # Re-inject inlet BC
         state = inject_uniform_inlet(state, u_inlet, v_inlet)
 
-        # Enforce solid BCs
-        u, v = apply_zero_velocity_at_solids(
+        # Free-slip on top/bottom walls (replaces old solid-wall treatment)
+        state = apply_slip_top_bottom_bc(state)
+
+        # Enforce solid BCs (airfoil no-penetration) using IBM
+        u, v = apply_ibm_continuous_forcing(
             state.velocity.u, state.velocity.v, state.solid_mask
         )
         state = state.__class__(
@@ -233,12 +305,17 @@ def make_rans_step(grid: FluidGrid, u_inlet: float, v_inlet: float):
             step=state.step,
         )
 
-        # Pressure projection
-        state = grid.solve_pressure(state, num_iters=60)
+        # Pressure projection — 300 GS iters (up from 60) for adequate convergence
+        # on the 200×600 grid.  Warm-start from previous pressure helps a lot.
+        state = grid.solve_pressure(state, num_iters=300)
         state = grid.project_velocity(state)
 
-        # Re-inject inlet (projection can corrupt inlet)
+        # Re-inject inlet and BCs (projection step can corrupt boundaries)
         state = inject_uniform_inlet(state, u_inlet, v_inlet)
+        state = apply_slip_top_bottom_bc(state)
+
+        # Neumann outflow at right boundary — lets wake/vortices exit cleanly
+        state = apply_outflow_bc(state)
 
         return state.__class__(
             density=state.density,
@@ -403,7 +480,7 @@ def run_aoa(aoa_deg: float):
     # Initialise uniform free-stream velocity
     u_init = jnp.ones((HEIGHT, WIDTH + 1)) * u_inlet
     v_init = jnp.ones((HEIGHT + 1, WIDTH)) * v_inlet
-    u_init, v_init = apply_zero_velocity_at_solids(u_init, v_init, solid_mask)
+    u_init, v_init = apply_ibm_continuous_forcing(u_init, v_init, solid_mask)
     state = state.__class__(
         density=state.density,
         velocity=state.velocity.with_values(u_init, v_init),

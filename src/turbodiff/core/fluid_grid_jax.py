@@ -19,7 +19,7 @@ from turbodiff.core.grids import Grid, StaggeredGrid
 from turbodiff.core.utils import (
     create_solid_mask,
     create_solid_border,
-    apply_zero_velocity_at_solids,
+    apply_ibm_continuous_forcing,
     bilinear_interpolate,
 )
 
@@ -195,8 +195,8 @@ class FluidGrid:
         if velocity_v_init is None:
             velocity_v_init = jnp.zeros((self.height + 1, self.width))
 
-        # Apply solid boundary conditions
-        velocity_u_init, velocity_v_init = apply_zero_velocity_at_solids(
+        # Apply continuous forcing solid boundary conditions
+        velocity_u_init, velocity_v_init = apply_ibm_continuous_forcing(
             velocity_u_init, velocity_v_init, self.solid_mask
         )
         velocity = StaggeredGrid(
@@ -422,10 +422,14 @@ class FluidGrid:
 
         # Modified strain rate: S̃ = Ω + ν̃/(κ²d²)*f_v2
         kappa2 = self.sa_kappa**2
-        S_tilde = jnp.maximum(
-            omega + nu_tilde / (kappa2 * d**2 + 1e-30) * fv2,
-            0.0,
-        )
+        # SA-2000 / Edwards correction: S̃ must not fall below Clim·Ω.
+        # Without this clip, S̃ can go to zero or negative near stagnation,
+        # which zeroes production and causes SA to diverge.
+        S_bar = nu_tilde / (kappa2 * d**2 + 1e-30) * fv2
+        S_tilde = omega + S_bar
+        clim = 0.3
+        S_tilde = jnp.maximum(S_tilde, clim * omega)
+        S_tilde = jnp.maximum(S_tilde, 1e-10)  # absolute safety floor
 
         production = cb1 * S_tilde * nu_tilde
         destruction = cw1 * (nu_tilde / (d + 1e-30)) ** 2
@@ -853,8 +857,8 @@ class FluidGrid:
         (u_new, _), _ = jax.lax.scan(gs_u, (u0, u0), None, length=num_iters)
         (v_new, _), _ = jax.lax.scan(gs_v, (v0, v0), None, length=num_iters)
 
-        # Enforce exact solid boundaries
-        u_new, v_new = apply_zero_velocity_at_solids(u_new, v_new, state.solid_mask)
+        # Enforce exact solid boundaries via IBM continuous forcing
+        u_new, v_new = apply_ibm_continuous_forcing(u_new, v_new, state.solid_mask)
 
         return state.__class__(
             density=state.density,
@@ -949,58 +953,55 @@ class FluidGrid:
         """
         divergence = self.compute_divergence(state)
         solid = state.solid_mask
-        # Compute fluid fraction (1.0 = fully fluid, 0.0 = fully solid)
-        fluid_fraction = 1.0 - solid
-        pressure = jnp.zeros((self.height, self.width))
+
+        # Fractional fluid masks at faces for volume-penalised pressure Poisson
+        # These represent the exact area fraction of the face open to fluid
+        fluid_u = jnp.ones((self.height, self.width + 1))
+        fluid_u = fluid_u.at[:, 1:-1].set(1.0 - 0.5 * (solid[:, :-1] + solid[:, 1:]))
+        fluid_u = fluid_u.at[:, 0].set(1.0 - solid[:, 0])
+        fluid_u = fluid_u.at[:, -1].set(1.0 - solid[:, -1])
+
+        fluid_v = jnp.ones((self.height + 1, self.width))
+        fluid_v = fluid_v.at[1:-1, :].set(1.0 - 0.5 * (solid[:-1, :] + solid[1:, :]))
+        fluid_v = fluid_v.at[0, :].set(1.0 - solid[0, :])
+        fluid_v = fluid_v.at[-1, :].set(1.0 - solid[-1, :])
+
+        # Warm-start from the previous pressure
+        pressure = state.pressure.values
         scale = self.rho * self.cell_size * self.cell_size / self.dt
 
         @jax.jit
         def gs_iteration(p_div):
             p, div = p_div
 
-            neighbor_sum = jnp.zeros_like(p)
-            neighbor_count = jnp.zeros_like(p)
+            # Gather fluid-neighbour pressures via padding (zero outside domain → Neumann)
+            left_p = jnp.pad(p[:, :-1], ((0, 0), (1, 0)))
+            left_mask = fluid_u[:, :-1]
 
-            # Left neighbor - weighted by fluid fraction
-            left_contrib = jnp.zeros_like(p)
-            left_weight = jnp.zeros_like(p)
-            left_contrib = left_contrib.at[:, 1:].set(p[:, :-1])
-            left_weight = left_weight.at[:, 1:].set(fluid_fraction[:, :-1])
-            neighbor_sum += left_contrib * left_weight
-            neighbor_count += left_weight
+            right_p = jnp.pad(p[:, 1:], ((0, 0), (0, 1)))
+            right_mask = fluid_u[:, 1:]
 
-            # Right neighbor - weighted by fluid fraction
-            right_contrib = jnp.zeros_like(p)
-            right_weight = jnp.zeros_like(p)
-            right_contrib = right_contrib.at[:, :-1].set(p[:, 1:])
-            right_weight = right_weight.at[:, :-1].set(fluid_fraction[:, 1:])
-            neighbor_sum += right_contrib * right_weight
-            neighbor_count += right_weight
+            up_p = jnp.pad(p[:-1, :], ((1, 0), (0, 0)))
+            up_mask = fluid_v[:-1, :]
 
-            # Up neighbor - weighted by fluid fraction
-            up_contrib = jnp.zeros_like(p)
-            up_weight = jnp.zeros_like(p)
-            up_contrib = up_contrib.at[1:, :].set(p[:-1, :])
-            up_weight = up_weight.at[1:, :].set(fluid_fraction[:-1, :])
-            neighbor_sum += up_contrib * up_weight
-            neighbor_count += up_weight
+            down_p = jnp.pad(p[1:, :], ((0, 1), (0, 0)))
+            down_mask = fluid_v[1:, :]
 
-            # Down neighbor - weighted by fluid fraction
-            down_contrib = jnp.zeros_like(p)
-            down_weight = jnp.zeros_like(p)
-            down_contrib = down_contrib.at[:-1, :].set(p[1:, :])
-            down_weight = down_weight.at[:-1, :].set(fluid_fraction[1:, :])
-            neighbor_sum += down_contrib * down_weight
-            neighbor_count += down_weight
-
-            # Scale divergence by fluid fraction for partially solid cells
-            # Only the fluid portion needs to satisfy incompressibility
-            div_contrib = div * scale * fluid_fraction
-            # Only solve for pressure in cells with some fluid fraction
-            new_p = jnp.where(
-                neighbor_count > 0, (neighbor_sum - div_contrib) / neighbor_count, 0.0
+            neighbor_sum = (
+                left_p * left_mask
+                + right_p * right_mask
+                + up_p * up_mask
+                + down_p * down_mask
             )
-            # Zero out pressure in fully solid cells (solid_mask >= 0.999)
+            neighbor_count = left_mask + right_mask + up_mask + down_mask
+
+            # GS update: p_c = (Σ fractional_neighbour_pressures − scale·div) / N_fractional
+            new_p = jnp.where(
+                neighbor_count > 1e-6,
+                (neighbor_sum - div * scale) / neighbor_count,
+                0.0,
+            )
+            # Pressure is zero inside fully solid cells
             new_p = jnp.where(solid >= 0.999, 0.0, new_p)
 
             return (new_p, div)
@@ -1038,46 +1039,27 @@ class FluidGrid:
         u = state.velocity.u
         v = state.velocity.v
         solid = state.solid_mask
-        # Compute fluid fraction (1.0 = fully fluid, 0.0 = fully solid)
-        fluid_fraction = 1.0 - solid
+        h = self.cell_size
+        rho = self.rho
+        dt = self.dt
 
-        # Horizontal velocities (u-faces between cells)
-        p_left = pressure[:, :-1]
-        p_right = pressure[:, 1:]
-        grad_u = -(p_right - p_left) * self.dt / self.cell_size
+        # Correct fractional-step projection:
+        #   u -= (dt/ρ) · ∂p/∂x
+        #   v -= (dt/ρ) · ∂p/∂y
+        # No fluid-fraction weighting — that was halving the correction at every
+        # wall-adjacent face.  No-penetration is enforced afterwards by
+        # apply_ibm_continuous_forcing, which is the proper way to handle it.
 
-        # For partial masking: average fluid fraction at the face
-        # u[i,j] is between cells [i, j-1] and [i, j]
-        fluid_left = fluid_fraction[:, :-1]
-        fluid_right = fluid_fraction[:, 1:]
-        # Use average fluid fraction at the face
-        fluid_at_u_face = (fluid_left + fluid_right) / 2.0
-        # Zero out gradient where face is mostly solid (avg fluid fraction < 0.001)
-        grad_u_masked = jnp.where(
-            fluid_at_u_face > 0.001, grad_u * fluid_at_u_face, 0.0
-        )
+        # Interior u-faces: u[i, j] is between cell [i, j-1] and [i, j]
+        dp_dx = (pressure[:, 1:] - pressure[:, :-1]) / h  # shape (H, W-1)
+        new_u = u.at[:, 1:-1].add(-dt / rho * dp_dx)
 
-        new_u = u.at[:, 1:-1].add(grad_u_masked)
+        # Interior v-faces: v[i, j] is between cell [i-1, j] and [i, j]
+        # (y increases downward in grid indexing)
+        dp_dy = (pressure[1:, :] - pressure[:-1, :]) / h  # shape (H-1, W)
+        new_v = v.at[1:-1, :].add(-dt / rho * dp_dy)
 
-        # Vertical velocities (v-faces between cells)
-        p_up = pressure[:-1, :]
-        p_down = pressure[1:, :]
-        grad_v = -(p_down - p_up) * self.dt / self.cell_size
-
-        # For partial masking: average fluid fraction at the face
-        # v[i,j] is between cells [i-1, j] and [i, j]
-        fluid_up = fluid_fraction[:-1, :]
-        fluid_down = fluid_fraction[1:, :]
-        # Use average fluid fraction at the face
-        fluid_at_v_face = (fluid_up + fluid_down) / 2.0
-        # Zero out gradient where face is mostly solid (avg fluid fraction < 0.001)
-        grad_v_masked = jnp.where(
-            fluid_at_v_face > 0.001, grad_v * fluid_at_v_face, 0.0
-        )
-
-        new_v = v.at[1:-1, :].add(grad_v_masked)
-
-        new_u, new_v = apply_zero_velocity_at_solids(new_u, new_v, solid)
+        new_u, new_v = apply_ibm_continuous_forcing(new_u, new_v, solid)
 
         return state.__class__(
             density=state.density,
@@ -1249,7 +1231,7 @@ class FluidGrid:
             raise ValueError(f"Unknown field_type: {field_type}")
 
         # Apply solid boundary conditions
-        u, v = apply_zero_velocity_at_solids(u, v, self.solid_mask)
+        u, v = apply_ibm_continuous_forcing(u, v, self.solid_mask)
 
         return state.__class__(
             density=state.density,
