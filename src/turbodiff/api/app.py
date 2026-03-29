@@ -9,6 +9,7 @@ from turbodiff.api import (
     streaming_server,
     cst_routes,
     optimization_server,
+    powerCalculation_routes
 )
 
 from turbodiff.db.storage import configure_storage_from_env
@@ -40,3 +41,4 @@ app.add_middleware(
 app.include_router(cst_routes.router)
 app.include_router(streaming_server.router)
 app.include_router(optimization_server.router)
+app.include_router(powerCalculation_routes.router)
