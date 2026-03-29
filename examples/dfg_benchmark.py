@@ -176,6 +176,9 @@ def main():
     nu = 0.001
     rho = 1.0
 
+    # Control volume indices for force computation and visualization
+    cv_rect = (14, 26, 14, 26)  # (i1, i2, j1, j2)
+
     sim = FluidGrid(
         height=height,
         width=width,
@@ -185,6 +188,8 @@ def main():
         viscosity=nu,
         boundary_type=0,
         visualise=False,
+        show_velocity=True,
+        cv_rect=cv_rect,
     )
 
     # Solid mask setup
@@ -212,23 +217,22 @@ def main():
     D = 0.1
     q = 0.5 * rho * (Umean**2) * D
 
-    step = 0
-    Cd_prev = 0.0
-
     print("Starting simulation loop... (Press Ctrl+C to stop)")
     print(f"{'Step':>6} | {'Cd':>8} | {'Cl':>8} | {'deltaCd':>8}")
 
     # Warm up JIT
     start_time = time.time()
-    state = step_turek(sim, state)
+    _state = step_turek(sim, state)
     _ = compute_forces(
-        state.velocity.u, state.velocity.v, state.pressure.values, cell_size, nu, rho
+        _state.velocity.u, _state.velocity.v, _state.pressure.values, cell_size, nu, rho
     )
     print(f"JIT Compilation took {time.time() - start_time:.2f} seconds")
 
-    while step <= 5000:
-        state = step_turek(sim, state)
+    # State for the callback
+    reporter_state = {"Cd_prev": 0.0, "Cd": 0.0, "Cl": 0.0}
 
+    def callback(grid: FluidGrid, state: FluidState):
+        step = state.step
         if step % 50 == 0 and step > 0:
             F_drag, F_lift = compute_forces(
                 state.velocity.u,
@@ -242,21 +246,35 @@ def main():
             Cd = float(F_drag) / q
             Cl = float(F_lift) / q
 
-            deltaCd = abs(Cd - Cd_prev)
+            deltaCd = abs(Cd - reporter_state["Cd_prev"])
             print(f"{step:06d} | {Cd:8.5f} | {Cl:8.5f} | {deltaCd:8.6f}")
+
+            reporter_state["Cd"] = Cd
+            reporter_state["Cl"] = Cl
 
             if step > 1000 and deltaCd < 1e-6:
                 print("\nSteady state reached!")
-                break
+                return True  # Stop simulation
 
-            Cd_prev = Cd
+            reporter_state["Cd_prev"] = Cd
+        return False
 
-        step += 1
+    state = sim.simulate(
+        state, steps=5000, custom_step_fn=step_turek, callback_fn=callback
+    )
+
+    Cd = reporter_state["Cd"]
+    Cl = reporter_state["Cl"]
+
     print(f"Final Cd = {Cd:.5f}")
     print(f"Final Cl = {Cl:.5f}")
     print("Benchmark reference Cd = 5.5795")
+    print("Benchmark reference Cl = 0.0117")
     print(
         f"Diff                   = {abs(Cd - 5.5795):.5f} = {abs(Cd - 5.5795) / 5.5795 * 100:.2f}%"
+    )
+    print(
+        f"Diff                   = {abs(Cl - 0.0117):.5f} = {abs(Cl - 0.0117) / 0.0117 * 100:.2f}%"
     )
 
     print("Simulation finished.")

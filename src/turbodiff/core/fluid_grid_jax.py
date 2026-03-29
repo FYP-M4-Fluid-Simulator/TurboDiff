@@ -105,6 +105,7 @@ class FluidGrid:
         show_velocity: bool = False,
         show_cell_centered_velocity: bool = False,
         use_sa_turbulence: bool = False,
+        cv_rect: Optional[tuple[int, int, int, int]] = None,
     ):
         self.height = height
         self.width = width
@@ -142,6 +143,7 @@ class FluidGrid:
         self.is_wind_tunnel = False
         self.inlet_velocity = 2.0
         self.inlet_angle_rad = 0.0
+        self.cv_rect = cv_rect  # (i1, i2, j1, j2)
 
         # Create solid mask
         self.solid_mask = create_solid_mask(
@@ -919,7 +921,7 @@ class FluidGrid:
     @jax.jit
     def compute_divergence(self, state: FluidState) -> Array:
         """
-        Compute divergence of velocity field at cell centers.
+        Compute divergence of volume flux for Immersed Boundary Method.
 
         Args:
             state: Current simulation state
@@ -929,9 +931,23 @@ class FluidGrid:
         """
         u = state.velocity.u
         v = state.velocity.v
+        solid = state.solid_mask
 
-        div = (u[:, 1:] - u[:, :-1]) / self.cell_size + (
-            v[1:, :] - v[:-1, :]
+        # Fractional fluid masks at faces for volume-penalised divergence
+        fluid_u = jnp.ones((self.height, self.width + 1))
+        fluid_u = fluid_u.at[:, 1:-1].set(1.0 - 0.5 * (solid[:, :-1] + solid[:, 1:]))
+        fluid_u = fluid_u.at[:, 0].set(1.0 - solid[:, 0])
+        fluid_u = fluid_u.at[:, -1].set(1.0 - solid[:, -1])
+
+        fluid_v = jnp.ones((self.height + 1, self.width))
+        fluid_v = fluid_v.at[1:-1, :].set(1.0 - 0.5 * (solid[:-1, :] + solid[1:, :]))
+        fluid_v = fluid_v.at[0, :].set(1.0 - solid[0, :])
+        fluid_v = fluid_v.at[-1, :].set(1.0 - solid[-1, :])
+
+        div = (
+            u[:, 1:] * fluid_u[:, 1:] - u[:, :-1] * fluid_u[:, :-1]
+        ) / self.cell_size + (
+            v[1:, :] * fluid_v[1:, :] - v[:-1, :] * fluid_v[:-1, :]
         ) / self.cell_size
 
         return div
@@ -1464,45 +1480,56 @@ class FluidGrid:
             u_array = np.asarray(state.velocity.u)
             v_array = np.asarray(state.velocity.v)
 
+            # Dynamic color scaling based on mean velocity magnitude
+            u_centers = (u_array[:, :-1] + u_array[:, 1:]) / 2.0
+            v_centers = (v_array[:-1, :] + v_array[1:, :]) / 2.0
+            mags_all = np.sqrt(u_centers**2 + v_centers**2)
+
+            # Use mean velocity of non-solid cells for scaling if available
+            fluid_mags = (
+                mags_all[solid_mask_array == 0]
+                if solid_mask_array is not None
+                else mags_all
+            )
+            mean_vel = np.mean(fluid_mags) if fluid_mags.size > 0 else 0.0
+            # Scale so that 2x mean velocity is red, mean is green, 0 is blue
+            v_scale = 2.0 * mean_vel if mean_vel > 1e-4 else 1.0
+
             if self.show_cell_centered_velocity:
                 # Cell Centered Velocity
-                # Vectorized velocity computation at cell centers
-                u_at_centers = (u_array[:, :-1] + u_array[:, 1:]) / 2.0
-                v_at_centers = (v_array[:-1, :] + v_array[1:, :]) / 2.0
-
-                # Compute magnitudes
-                mags = np.sqrt(u_at_centers**2 + v_at_centers**2)
-                mags_clamped = np.minimum(mags, 1.0)
-
                 # Normalized directions (avoid division by zero)
-                mag_nonzero = mags > 1e-6
-                # Use np.divide with where parameter to safely handle division
+                mag_nonzero = mags_all > 1e-6
                 mag_dir_x = np.divide(
-                    u_at_centers,
-                    mags,
-                    out=np.zeros_like(u_at_centers),
+                    u_centers,
+                    mags_all,
+                    out=np.zeros_like(u_centers),
                     where=mag_nonzero,
                 )
                 mag_dir_y = np.divide(
-                    v_at_centers,
-                    mags,
-                    out=np.zeros_like(v_at_centers),
+                    v_centers,
+                    mags_all,
+                    out=np.zeros_like(v_centers),
                     where=mag_nonzero,
                 )
 
                 for i in range(self.height):
                     for j in range(self.width):
-                        mag = float(mags_clamped[i, j])
+                        mag = float(mags_all[i, j])
                         mag_dir_x_val = float(mag_dir_x[i, j])
                         mag_dir_y_val = float(mag_dir_y[i, j])
 
-                        # Color based on magnitude
-                        r = int(255 * mag)
-                        g = 0
-                        b = int(255 * (1 - mag))
-                        color = (r, g, b)
+                        # Color based on magnitude relative to mean
+                        norm = min(1.0, mag / v_scale)
+                        if norm < 0.5:
+                            # Blue to Green
+                            t = norm * 2.0
+                            color = (0, int(255 * t), int(255 * (1 - t)))
+                        else:
+                            # Green to Red
+                            t = (norm - 0.5) * 2.0
+                            color = (int(255 * t), int(255 * (1 - t)), 0)
 
-                        # Draw arrow
+                        # Draw arrow (length is fixed scaling, arrowhead scales with norm)
                         scale = self.display_size * 0.4
                         start_x = (j + 0.5) * self.display_size
                         start_y = (i + 0.5) * self.display_size
@@ -1513,9 +1540,9 @@ class FluidGrid:
                             self.screen, color, (start_x, start_y), (end_x, end_y), 2
                         )
 
-                        # Draw arrowhead
+                        # Draw arrowhead scaled by normalized magnitude
                         angle = math.atan2(mag_dir_y_val, mag_dir_x_val)
-                        tip_len = scale * mag / 2
+                        tip_len = scale * norm / 2
                         spread = math.radians(25)
 
                         left_x = end_x - tip_len * math.cos(angle - spread)
@@ -1535,29 +1562,31 @@ class FluidGrid:
                 # Horizontal Velocity (u-velocities at vertical faces)
                 for i in range(self.height):
                     for j in range(self.width + 1):
-                        mag_dir = float(u_array[i, j])
-                        mag_dir = (
-                            min(1.0, mag_dir) if mag_dir > 0 else max(-1.0, mag_dir)
-                        )
+                        u_val = float(u_array[i, j])
 
-                        # Color based on magnitude
-                        r = int(255 * abs(mag_dir))
-                        g = 0
-                        b = int(255 * (1 - abs(mag_dir)))
-                        color = (r, g, b)
+                        # Color based on magnitude relative to mean
+                        norm = min(1.0, abs(u_val) / v_scale)
+                        if norm < 0.5:
+                            t = norm * 2.0
+                            color = (0, int(255 * t), int(255 * (1 - t)))
+                        else:
+                            t = (norm - 0.5) * 2.0
+                            color = (int(255 * t), int(255 * (1 - t)), 0)
 
                         scale = self.display_size * 0.4
                         start_x = j * self.display_size
-                        end_x = start_x + scale * mag_dir
+                        end_x = start_x + scale * (
+                            u_val / v_scale if abs(u_val) > 1e-6 else 0
+                        )
                         y = (i + 0.5) * self.display_size
 
                         pygame.draw.aaline(
                             self.screen, color, (start_x, y), (end_x, y), 2
                         )
 
-                        # Draw arrowhead
-                        angle = 0 if mag_dir > 0 else math.pi
-                        tip_len = scale * abs(mag_dir) / 2
+                        # Draw arrowhead scaled by normalized magnitude
+                        angle = 0 if u_val > 0 else math.pi
+                        tip_len = scale * norm / 2
                         spread = math.radians(25)
 
                         left_x = end_x - tip_len * math.cos(angle - spread)
@@ -1575,29 +1604,31 @@ class FluidGrid:
                 # Vertical Velocity (v-velocities at horizontal faces)
                 for i in range(self.height + 1):
                     for j in range(self.width):
-                        mag_dir = float(v_array[i, j])
-                        mag_dir = (
-                            min(1.0, mag_dir) if mag_dir > 0 else max(-1.0, mag_dir)
-                        )
+                        v_val = float(v_array[i, j])
 
-                        # Color based on magnitude
-                        r = int(255 * abs(mag_dir))
-                        g = 0
-                        b = int(255 * (1 - abs(mag_dir)))
-                        color = (r, g, b)
+                        # Color based on magnitude relative to mean
+                        norm = min(1.0, abs(v_val) / v_scale)
+                        if norm < 0.5:
+                            t = norm * 2.0
+                            color = (0, int(255 * t), int(255 * (1 - t)))
+                        else:
+                            t = (norm - 0.5) * 2.0
+                            color = (int(255 * t), int(255 * (1 - t)), 0)
 
                         scale = self.display_size * 0.4
                         x = (j + 0.5) * self.display_size
                         start_y = i * self.display_size
-                        end_y = start_y + scale * mag_dir
+                        end_y = start_y + scale * (
+                            v_val / v_scale if abs(v_val) > 1e-6 else 0
+                        )
 
                         pygame.draw.aaline(
                             self.screen, color, (x, start_y), (x, end_y), 2
                         )
 
-                        # Draw arrowhead
-                        angle = math.pi / 2 if mag_dir > 0 else -math.pi / 2
-                        tip_len = scale * abs(mag_dir) / 2
+                        # Draw arrowhead scaled by normalized magnitude
+                        angle = math.pi / 2 if v_val > 0 else -math.pi / 2
+                        tip_len = scale * norm / 2
                         spread = math.radians(25)
 
                         left_x = x - tip_len * math.cos(angle - spread)
@@ -1650,16 +1681,39 @@ class FluidGrid:
                 (mouse_x, mouse_y + 10),
                 2,
             )
+        # Draw control volume border if specified
+        if self.cv_rect is not None:
+            i1, i2, j1, j2 = self.cv_rect
+            # j is horizontal (x), i is vertical (y)
+            # rect = (x, y, width, height)
+            rect = pygame.Rect(
+                j1 * self.display_size,
+                i1 * self.display_size,
+                (j2 - j1) * self.display_size,
+                (i2 - i1) * self.display_size,
+            )
+            # Draw with a distinct color (green) and thick border
+            pygame.draw.rect(self.screen, (0, 255, 0), rect, 2)
 
         pygame.display.flip()
 
-    def simulate(self, state: FluidState, steps: int = -1) -> FluidState:
+    def simulate(
+        self,
+        state: FluidState,
+        steps: int = -1,
+        custom_step_fn: Optional[
+            Callable[["FluidGrid", FluidState], FluidState]
+        ] = None,
+        callback_fn: Optional[Callable[["FluidGrid", FluidState], None]] = None,
+    ) -> FluidState:
         """
         Run simulation loop with visualization.
 
         Args:
             state: Initial simulation state
             steps: Number of steps (-1 for infinite)
+            custom_step_fn: Optional custom function to advance simulation
+            callback_fn: Optional function called after each step
 
         Returns:
             Final simulation state
@@ -1693,7 +1747,14 @@ class FluidGrid:
                         print(f"Clicked cell: ({i}, {j})")
 
             # Simulation step
-            state = self.step(state)
+            if custom_step_fn is not None:
+                state = custom_step_fn(self, state)
+            else:
+                state = self.step(state)
+
+            if callback_fn is not None:
+                if callback_fn(self, state):
+                    break
 
             if self.visualise:
                 self.draw_state(state)
@@ -1775,6 +1836,7 @@ def _fluid_grid_flatten(grid):
         "show_velocity": grid.show_velocity,
         "show_cell_centered_velocity": grid.show_cell_centered_velocity,
         "is_wind_tunnel": grid.is_wind_tunnel,
+        "cv_rect": grid.cv_rect,
     }
     return children, metadata
 
@@ -1798,6 +1860,7 @@ def _fluid_grid_unflatten(metadata, children):
         show_cell_property=metadata["show_cell_property"],
         show_velocity=metadata["show_velocity"],
         show_cell_centered_velocity=metadata["show_cell_centered_velocity"],
+        cv_rect=metadata.get("cv_rect"),
     )
 
     # Replace the solid_mask with the one from children

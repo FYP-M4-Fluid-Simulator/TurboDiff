@@ -145,7 +145,8 @@ def main():
         diffusion=0.0,
         viscosity=nu,
         boundary_type=0,  # no automatic boundary
-        visualise=False,
+        # visualise=True,   # Enabled for real-time visualization
+        # show_velocity=True
     )
 
     # Solid mask: only top and bottom walls
@@ -156,9 +157,29 @@ def main():
 
     state = sim.create_initial_state()
 
+    max_steps = 15000
+    check_every = 500
+    l2_prev = None
+
+    def callback(grid: FluidGrid, st: FluidState) -> bool:
+        nonlocal l2_prev
+        if st.step % check_every == 0:
+            y, u_s, u_r, l2, max_e = evaluate_profile(st, grid)
+            u_cl_s = u_s[height // 2]
+            u_cl_r = u_r[height // 2]
+            print(
+                f"{st.step:6d} | {l2:10.4f} | {max_e:11.4f} | {u_cl_s:9.5f} | {u_cl_r:9.5f}"
+            )
+
+            if l2_prev is not None and abs(l2 - l2_prev) < 0.001:
+                print("\n✓ Converged to steady state.")
+                return True
+            l2_prev = l2
+        return False
+
     # ── JIT warm-up ──────────────────────────────────────────────────────────
     t0 = time.time()
-    state = step_poiseuille(sim, state)
+    _ = step_poiseuille(sim, state)
     print(f"JIT compilation: {time.time() - t0:.2f} s")
 
     # ── Simulation loop ───────────────────────────────────────────────────────
@@ -167,25 +188,10 @@ def main():
     )
     print("-" * 60)
 
-    max_steps = 15000
-    check_every = 500
-    l2_prev = None
-
-    for step in range(1, max_steps + 1):
-        state = step_poiseuille(sim, state)
-
-        if step % check_every == 0:
-            y_arr, u_sim, u_ref, l2, max_e = evaluate_profile(state, sim)
-            u_cl_sim = u_sim[height // 2]  # centreline cell
-            u_cl_ref = u_ref[height // 2]
-            print(
-                f"{step:6d} | {l2:10.4f} | {max_e:11.4f} | {u_cl_sim:9.5f} | {u_cl_ref:9.5f}"
-            )
-
-            if l2_prev is not None and abs(l2 - l2_prev) < 0.001:
-                print("\n✓ Converged to steady state.")
-                break
-            l2_prev = l2
+    # Use the standard simulation machine with our custom physics and callback
+    state = sim.simulate(
+        state, steps=max_steps, custom_step_fn=step_poiseuille, callback_fn=callback
+    )
 
     # ── Final report ──────────────────────────────────────────────────────────
     y_arr, u_sim, u_ref, l2, max_e = evaluate_profile(state, sim)

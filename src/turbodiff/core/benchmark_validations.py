@@ -13,18 +13,6 @@ from turbodiff.core.utils import apply_zero_velocity_at_solids
 
 
 @dataclass(frozen=True)
-class TaylorGreenMetrics:
-    elapsed_time: float
-    energy_ratio_sim: float
-    energy_ratio_analytic: float
-    energy_ratio_rel_error: float
-    corr_u: float
-    corr_v: float
-    div_l2: float
-    div_max: float
-
-
-@dataclass(frozen=True)
 class BlasiusMetrics:
     station_x: float
     rmse_u_over_uinf: float
@@ -34,7 +22,7 @@ class BlasiusMetrics:
     wall_u_over_uinf: float
 
 
-def _update_state(
+def update_fluid_state(
     state: FluidState,
     *,
     u: jnp.ndarray | None = None,
@@ -57,141 +45,12 @@ def _update_state(
     )
 
 
-def _cell_centered_velocity(state: FluidState) -> tuple[np.ndarray, np.ndarray]:
+def get_cell_centered_velocity(state: FluidState) -> tuple[np.ndarray, np.ndarray]:
     u_face = np.array(state.velocity.u)
     v_face = np.array(state.velocity.v)
     u_cc = 0.5 * (u_face[:, :-1] + u_face[:, 1:])
     v_cc = 0.5 * (v_face[:-1, :] + v_face[1:, :])
     return u_cc, v_cc
-
-
-def _kinetic_energy_density(state: FluidState) -> float:
-    u_cc, v_cc = _cell_centered_velocity(state)
-    return 0.5 * float(np.mean(u_cc * u_cc + v_cc * v_cc))
-
-
-def _build_taylor_green_initial_faces(
-    n: int,
-    cell_size: float,
-    u0: float,
-) -> tuple[jnp.ndarray, jnp.ndarray, np.ndarray, np.ndarray]:
-    x = (jnp.arange(n) + 0.5) * cell_size
-    y = (jnp.arange(n) + 0.5) * cell_size
-    yy, xx = jnp.meshgrid(y, x, indexing="ij")
-
-    u_cc = u0 * jnp.sin(xx) * jnp.cos(yy)
-    v_cc = -u0 * jnp.cos(xx) * jnp.sin(yy)
-
-    u_face = jnp.zeros((n, n + 1))
-    u_face = u_face.at[:, 1:-1].set(0.5 * (u_cc[:, :-1] + u_cc[:, 1:]))
-    u_face = u_face.at[:, 0].set(u_cc[:, 0])
-    u_face = u_face.at[:, -1].set(u_cc[:, -1])
-
-    v_face = jnp.zeros((n + 1, n))
-    v_face = v_face.at[1:-1, :].set(0.5 * (v_cc[:-1, :] + v_cc[1:, :]))
-    v_face = v_face.at[0, :].set(v_cc[0, :])
-    v_face = v_face.at[-1, :].set(v_cc[-1, :])
-
-    return u_face, v_face, np.array(xx), np.array(yy)
-
-
-def _correlation(a: np.ndarray, b: np.ndarray) -> float:
-    a_flat = a.ravel()
-    b_flat = b.ravel()
-    a_std = np.std(a_flat)
-    b_std = np.std(b_flat)
-    if a_std < 1e-12 or b_std < 1e-12:
-        return 0.0
-    return float(np.corrcoef(a_flat, b_flat)[0, 1])
-
-
-def run_taylor_green_vortex_benchmark(
-    *,
-    n: int = 40,
-    dt: float = 0.002,
-    viscosity: float = 0.01,
-    u0: float = 0.25,
-    steps: int = 120,
-    pressure_iters: int = 40,
-    diffusion_iters: int = 16,
-    trim: int = 2,
-) -> TaylorGreenMetrics:
-    """Run a Taylor-Green vortex benchmark on the base CFD solver.
-
-    This benchmark checks:
-    - kinetic energy decay against the analytical exponential trend
-    - spatial correlation of velocity fields against the analytical shape
-    - incompressibility via divergence metrics
-    """
-    length = 2.0 * np.pi
-    cell_size = length / n
-
-    u_face, v_face, xx, yy = _build_taylor_green_initial_faces(n, cell_size, u0)
-
-    grid = FluidGrid(
-        height=n,
-        width=n,
-        cell_size=cell_size,
-        dt=dt,
-        diffusion=0.0,
-        viscosity=viscosity,
-        boundary_type=0,
-        visualise=False,
-        use_sa_turbulence=False,
-    )
-    state = grid.create_initial_state(velocity_u_init=u_face, velocity_v_init=v_face)
-    state_initial = state
-
-    @jax.jit
-    def step_fn(sim: FluidGrid, st: FluidState) -> FluidState:
-        st = sim.diffuse_velocity(st, num_iters=diffusion_iters)
-        st = sim.advect_velocity(st)
-        st = sim.solve_pressure(st, num_iters=pressure_iters)
-        st = sim.project_velocity(st)
-        return _update_state(st, time=st.time + sim.dt, step=st.step + 1)
-
-    _ = step_fn(grid, state)  # JIT warm-up
-    state = state_initial
-    e0 = _kinetic_energy_density(state)
-
-    for _ in range(steps):
-        state = step_fn(grid, state)
-
-    elapsed = float(state.time)
-    e_sim = _kinetic_energy_density(state)
-    ratio_sim = e_sim / (e0 + 1e-12)
-    ratio_ref = float(np.exp(-2.0 * viscosity * elapsed))
-    ratio_rel_error = abs(ratio_sim - ratio_ref) / (ratio_ref + 1e-12)
-
-    u_cc, v_cc = _cell_centered_velocity(state)
-    decay = ratio_ref
-    u_ref = u0 * np.sin(xx) * np.cos(yy) * decay
-    v_ref = -u0 * np.cos(xx) * np.sin(yy) * decay
-
-    if trim > 0 and 2 * trim < n:
-        sl = (slice(trim, -trim), slice(trim, -trim))
-        corr_u = _correlation(u_cc[sl], u_ref[sl])
-        corr_v = _correlation(v_cc[sl], v_ref[sl])
-    else:
-        corr_u = _correlation(u_cc, u_ref)
-        corr_v = _correlation(v_cc, v_ref)
-
-    u_arr = np.array(state.velocity.u)
-    v_arr = np.array(state.velocity.v)
-    div = (u_arr[:, 1:] - u_arr[:, :-1]) / cell_size + (
-        v_arr[1:, :] - v_arr[:-1, :]
-    ) / cell_size
-
-    return TaylorGreenMetrics(
-        elapsed_time=elapsed,
-        energy_ratio_sim=ratio_sim,
-        energy_ratio_analytic=ratio_ref,
-        energy_ratio_rel_error=ratio_rel_error,
-        corr_u=corr_u,
-        corr_v=corr_v,
-        div_l2=float(np.sqrt(np.mean(div * div))),
-        div_max=float(np.max(np.abs(div))),
-    )
 
 
 def _blasius_profile(
@@ -264,6 +123,7 @@ def run_blasius_boundary_layer_benchmark(
     station_x: float = 0.7,
     pressure_iters: int = 60,
     diffusion_iters: int = 24,
+    visualise: bool = False,
 ) -> BlasiusMetrics:
     """Run a flat-plate laminar boundary-layer benchmark against Blasius."""
 
@@ -275,7 +135,7 @@ def run_blasius_boundary_layer_benchmark(
         diffusion=0.0,
         viscosity=viscosity,
         boundary_type=0,
-        visualise=False,
+        visualise=visualise,
         use_sa_turbulence=False,
     )
 
@@ -294,7 +154,7 @@ def run_blasius_boundary_layer_benchmark(
         u = st.velocity.u.at[:, 0:2].set(u_inf)
         v = st.velocity.v.at[:, 0:1].set(0.0)
         u, v = apply_zero_velocity_at_solids(u, v, st.solid_mask)
-        st = _update_state(st, u=u, v=v)
+        st = update_fluid_state(st, u=u, v=v)
 
         st = sim.solve_pressure(st, num_iters=pressure_iters)
         st = sim.project_velocity(st)
@@ -302,16 +162,15 @@ def run_blasius_boundary_layer_benchmark(
         u = st.velocity.u.at[:, 0:2].set(u_inf)
         v = st.velocity.v.at[:, 0:1].set(0.0)
         u, v = apply_zero_velocity_at_solids(u, v, st.solid_mask)
-        return _update_state(st, u=u, v=v, time=st.time + sim.dt, step=st.step + 1)
+        return update_fluid_state(st, u=u, v=v, time=st.time + sim.dt, step=st.step + 1)
 
     state = step_fn(grid, state)  # JIT warm-up
-    for _ in range(steps):
-        state = step_fn(grid, state)
+    state = grid.simulate(state, steps=steps, custom_step_fn=step_fn)
 
     x_idx = max(2, min(width - 3, int(round(station_x / cell_size))))
     x_phys = (x_idx + 0.5) * cell_size
 
-    u_cc, _ = _cell_centered_velocity(state)
+    u_cc, _ = get_cell_centered_velocity(state)
     u_col = u_cc[:, x_idx]
 
     fluid_rows = np.arange(0, height - 1)  # exclude solid bottom row
