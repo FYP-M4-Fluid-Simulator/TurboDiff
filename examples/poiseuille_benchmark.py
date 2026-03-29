@@ -211,11 +211,14 @@ def main():
 
     # ── Profile table ─────────────────────────────────────────────────────────
     print("\nVelocity profile at x = L/2:")
-    print(f"{'y (m)':>8}  {'u_sim':>9}  {'u_ref':>9}  {'err (%)':>8}")
-    print("-" * 40)
+    print(f"{'y (m)':>8}  {'u_sim':>9}  {'u_ref':>9}  {'abs_diff':>10}  {'err (%)':>8}")
+    print("-" * 52)
     for i in range(0, height, max(1, height // 10)):
-        err_pct = abs(u_sim[i] - u_ref[i]) / (u_ref[i] + 1e-12) * 100
-        print(f"{y_arr[i]:8.4f}  {u_sim[i]:9.5f}  {u_ref[i]:9.5f}  {err_pct:8.3f}")
+        diff = abs(u_sim[i] - u_ref[i])
+        err_pct = diff / (u_ref[i] + 1e-12) * 100
+        print(
+            f"{y_arr[i]:8.4f}  {u_sim[i]:9.5f}  {u_ref[i]:9.5f}  {diff:10.6f}  {err_pct:8.3f}"
+        )
 
 
 if __name__ == "__main__":
