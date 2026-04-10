@@ -573,9 +573,13 @@ class FluidGrid:
             # Write back into full grid
             return (d.at[1:-1, 1:-1].set(new_center), d0)
 
-        # Run repeated iterations
-        new_density, _ = jax.lax.fori_loop(
-            0, num_iters, lambda _, d: gs_iteration(d), (density, density0)
+        # Run repeated iterations — scan preserves intermediate activations
+        # for reverse-mode autodiff (fori_loop does not support jax.grad).
+        def _gs_scan(carry, _):
+            return gs_iteration(carry), None
+
+        (new_density, _), _ = jax.lax.scan(
+            _gs_scan, (density, density0), None, length=num_iters
         )
 
         # Produce new state
@@ -1022,8 +1026,13 @@ class FluidGrid:
 
             return (new_p, div)
 
-        pressure, _ = jax.lax.fori_loop(
-            0, num_iters, lambda _, p: gs_iteration(p), (pressure, divergence)
+        # scan instead of fori_loop so that jax.grad can backprop through
+        # the pressure solver (fori_loop silently breaks reverse-mode AD).
+        def _gs_p_scan(carry, _):
+            return gs_iteration(carry), None
+
+        (pressure, _), _ = jax.lax.scan(
+            _gs_p_scan, (pressure, divergence), None, length=num_iters
         )
 
         return state.__class__(

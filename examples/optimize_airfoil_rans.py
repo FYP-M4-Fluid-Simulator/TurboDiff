@@ -1,19 +1,44 @@
 """
 RANS Airfoil Shape Optimization — CST + Spalart-Allmaras
 =========================================================
-Combines gradient-based CST optimization (optimize_airfoil.py) with the
-full RANS simulation setup (naca0012_rans_benchmark.py) to find an airfoil
-that maximises lift-to-drag ratio under turbulent flow conditions.
+Combines gradient-based CST optimization with the full RANS simulation setup
+to find an airfoil that maximises lift-to-drag ratio under turbulent flow.
 
 The final optimized shape is exported as a Selig-format .dat file that can be
 fed directly into xfoil_validation.py for independent XFoil verification.
+
+Physics conventions
+-------------------
+  - Chord length  c = 1.0 m  (fixed)
+  - Free-stream   U_inf = 1.0 m/s  (fixed)
+  - Viscosity     ν = 1 / Re  (so Re = U_inf · c / ν)
+  - AoA rotates the FREE-STREAM velocity vector:
+        u_inlet = U_inf · cos(AoA)
+        v_inlet = U_inf · sin(AoA)
+  - All four domain boundaries carry the same free-stream BC (no hard walls).
+
+Gradient strategy
+-----------------
+  Gradients are computed with jax.grad (exact, analytic) rather than finite
+  differences.  This requires the full loss computation — mask building,
+  RANS time integration, and force summation — to be a single pure-JAX
+  expression that JAX's autodiff engine can trace end-to-end.
+
+  The solid mask is built from the CST weights using jnp operations only,
+  so gradients flow from the pressure/viscous forces back through the
+  velocity field, through the IBM forcing, and into the mask geometry,
+  and from there into the CST weights.
+
+  Wall distance (needed for the SA turbulence model) is *not* differentiated:
+  it is computed once from the thresholded mask via scipy EDT and treated as
+  a fixed constant (jax.lax.stop_gradient).  This is a reasonable
+  approximation because turbulent viscosity changes are slow compared to the
+  pressure-force gradient signal.
 
 Setup:
   - CST parametrization : N_ORDER = 5 (6 weights per surface)
   - Grid                : HEIGHT × WIDTH cells, cell_size = 0.005 m
   - RANS model          : Spalart-Allmaras one-equation (SA-1994)
-  - Re                  : 2 × 10⁶  (U∞=1 m/s, ν=5×10⁻⁷ m²/s)
-  - Angle of Attack     : configurable via AoA_DEG
   - Objective           : minimise drag (with lift & geometry constraints)
 
 Output:
@@ -23,12 +48,14 @@ Output:
 
 Run:
   cd /Users/musab/FYP/TurboDiff
-  .venv/bin/python examples/optimize_airfoil_rans.py
+  .venv/bin/python examples/optimize_airfoil_rans.py \\
+      --re 2e6 --aoa 4
 
-Validate with XFoil (edit xfoil_validation.py to point at the output):
-  input_file = "optimized_airfoil.dat"
+  # Re options : 5e5 | 2e6 | 6e6
+  # AoA is any float (degrees).
 """
 
+import argparse
 import math
 import time
 
@@ -36,6 +63,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from scipy.ndimage import distance_transform_edt
+from scipy.special import comb as sp_comb
 import matplotlib
 
 matplotlib.use("Agg")  # headless — no display needed
@@ -55,41 +83,38 @@ from turbodiff.core.loss_functions import (
 # ─────────────────────────────────────────────────────────────────────────────
 # Persistent JIT-compiled infrastructure
 # ─────────────────────────────────────────────────────────────────────────────
-# Keyed by (u_inlet_rounded, v_inlet_rounded).  Stores (FluidGrid, rans_step)
-# so that every call to evaluate_rans reuses the same compiled objects.
+# Keyed by (u_inlet_rounded, v_inlet_rounded, nu_lam_rounded).
+# Stores (FluidGrid, rans_step) so every call to evaluate_rans reuses the
+# same compiled objects.
 _GRID_CACHE: dict = {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Hyper-parameters
+# Hyper-parameters  (geometry / simulation budget only — physics set by CLI)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Grid / domain
-HEIGHT = 64  # cells in y  (increase for finer resolution)
-WIDTH = 192  # cells in x
-CELL_SIZE = 0.005  # m  → domain 0.32 m × 0.96 m
+HEIGHT = 128  # cells in y
+WIDTH = 384  # cells in x
+CELL_SIZE = 0.01  # m  → domain 0.32 m × 0.96 m
 
-# RANS physics
-DT = 0.0005  # time-step (s) — CFL ≈ 0.1 at U=1, h=5 mm
-NU_LAM = 5e-7  # laminar kinematic viscosity → Re = U∞/ν = 2×10⁶
+# RANS physics (fixed)
+DT = 0.0002  # time-step (s) — CFL ≈ 0.08 at U=1, h=2.5 mm
 RHO = 1.0  # density (kg/m³)
-U_INF = 1.0  # free-stream speed (m/s)
+U_INF = 1.0  # free-stream speed (m/s)  – FIXED
+CHORD = 1.0  # chord length (m)         – FIXED (ν = U_INF * CHORD / Re)
 
 # Airfoil placement (leading-edge position inside the domain, in metres)
-CHORD = 0.3  # m  — scaled so it fits the smaller grid
-AIRFOIL_X0 = 0.2  # m  — x of leading edge
+AIRFOIL_X0 = 0.4  # m  — x of leading edge
 AIRFOIL_Y0 = HEIGHT * CELL_SIZE / 2.0  # m  — vertical midpoint
 
-# Angle of attack for optimization
-AoA_DEG = 4.0  # degrees
-
 # Simulation budget per gradient evaluation
-# Each FD iteration runs 2×12 = 24 evaluate_rans calls.
-# Total RANS steps per Adam step = 24 × N_SIM_STEPS.
-# At 64×192 with 100 steps + 60 pressure iters ≈ 1–2s/eval → ~30–50s/Adam step.
-N_SIM_STEPS = 100  # steps run per loss evaluation (increase for accuracy)
-N_WARMUP = 20  # steps excluded from force averaging (transient flush)
-N_AVG_STEPS = 10  # number of steps over which forces are time-averaged
+N_SIM_STEPS = 1000  # steps run per loss evaluation (force evaluated on final state)
+N_WARMUP = 0  # unused (kept for variable definition)
+N_AVG_STEPS = 1000  # unused (kept for variable definition)
+
+# Mask sub-sampling (anti-aliasing)
+N_SUB = 3  # sub-cell samples per direction
 
 # Optimization
 NUM_ITERATIONS = 10
@@ -102,7 +127,7 @@ MIN_THICKNESS_X = 0.25  # at this chord location
 
 # Loss weights
 W_DRAG = 1.0  # drag minimization
-W_LIFT = 0.5  # soft lift-maximization bonus (penalty for low lift)
+W_LIFT = 0.5  # soft lift-maximization bonus
 W_GEO = 10.0  # geometric feasibility
 
 # Output files  — will be written next to this script
@@ -112,146 +137,244 @@ OUTPUT_SHAPE = "rans_opt_shapes.png"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Solid-mask builder (analytically exact, super-sampled, from RANS benchmark)
+# CLI argument parsing
 # ─────────────────────────────────────────────────────────────────────────────
 
+_VALID_RE = {
+    "5e5": 5e5,
+    "2e6": 2e6,
+    "6e6": 6e6,
+}
 
-def build_solid_mask_cst(
-    weights_upper: np.ndarray,
-    weights_lower: np.ndarray,
-    height: int,
-    width: int,
-    cell_size: float,
-    chord: float,
-    x0: float,
-    y0: float,
-    aoa_deg: float,
-    n_sub: int = 3,
-) -> np.ndarray:
+
+def parse_args():
+    """Parse command-line arguments for Re and AoA."""
+    parser = argparse.ArgumentParser(
+        description="RANS CST Airfoil Optimisation",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--re",
+        choices=list(_VALID_RE.keys()),
+        default="2e6",
+        metavar="{5e5|2e6|6e6}",
+        help=(
+            "Reynolds number.  Chord and velocity are fixed at 1; "
+            "kinematic viscosity is derived as ν = 1/Re."
+        ),
+    )
+    parser.add_argument(
+        "--aoa",
+        type=float,
+        default=0.0,
+        metavar="DEG",
+        help=(
+            "Angle of attack in degrees.  Rotates the free-stream velocity "
+            "vector; all domain boundaries carry the same free-stream BC."
+        ),
+    )
+    parser.add_argument(
+        "--visualise",
+        default=False,
+        action="store_true",
+        help=(
+            "Launch a Pygame window to visualise the airflow on the initial shape. "
+            "Disables optimization."
+        ),
+    )
+    return parser.parse_args()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JAX-native solid-mask builder
+#
+# This version uses only jnp operations so that jax.grad can differentiate
+# through it.  The key difference vs the old numpy version:
+#   - the per-subcell accumulation is a jax.lax.fori_loop
+#   - "inside" is a smooth soft-mask via jnp.where instead of boolean comparison
+#   - no Python conditionals — JAX traces the whole thing symbolically
+#
+# The gradient ∂mask/∂weights flows through  y_u_g = C_g * (B_g @ weights)
+# and the comparison against cy_body (which is treated as constant w.r.t.
+# weights because the grid coordinates do not depend on weights).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Pre-compute geometry constants that never change (depend only on grid params)
+_JJ, _II = np.meshgrid(np.arange(WIDTH), np.arange(HEIGHT))  # (H, W), numpy
+_XI_COORDS: list[tuple] = []  # (cx_body, cy_body, xi_grid, xi_c, C_g, B_g) per sub
+
+
+def _precompute_subcell_geometry(aoa_deg: float) -> list[dict]:
     """
-    Build a super-sampled floating-point solid mask for a CST airfoil
-    at the given angle of attack.
-
-    Args:
-        weights_upper / weights_lower : CST Bernstein coefficients (numpy arrays)
-        height, width  : grid dimensions
-        cell_size      : metres per cell
-        chord          : chord length (m)
-        x0, y0         : leading-edge position in the domain (m)
-        aoa_deg        : angle of attack (degrees)
-        n_sub          : sub-sampling factor for anti-aliasing
-
-    Returns:
-        solid_mask : JAX float32 array (height, width), values in [0, 1]
+    Pre-compute all grid/geometry arrays (everything that doesn't depend on
+    CST weights) for the given AoA.  Called once per (AoA) combination and
+    cached.  Returns a list of dicts, one per sub-cell sample.
     """
-    aoa_rad = math.radians(aoa_deg)
-    cos_a, sin_a = math.cos(aoa_rad), math.sin(aoa_rad)
-
-    # Shape functions (exact mathematical Bernstein coefficients)
-    n_order = len(weights_upper) - 1
+    # Note: earlier we calculated cos_a/sin_a here, but we now keep the airfoil
+    # un-rotated relative to the grid, and only rotate the free-stream velocity vector.
+    n_order = N_ORDER
     i_vals = np.arange(n_order + 1)
-    from scipy.special import comb as sp_comb
+    binom = np.array(
+        [sp_comb(n_order, i, exact=True) for i in i_vals], dtype=np.float32
+    )
 
-    binom = np.array([sp_comb(n_order, i, exact=True) for i in i_vals])
-
-    # Cell-centre grid indices
-    jj, ii = np.meshgrid(np.arange(width), np.arange(height))  # (H, W)
-
-    solid_accum = np.zeros((height, width), dtype=np.float32)
-
-    for si in range(n_sub):
-        for sj in range(n_sub):
-            cx = (jj + (sj + 0.5) / n_sub) * cell_size  # physical x
-            cy = (ii + (si + 0.5) / n_sub) * cell_size  # physical y
-
-            # Translate and rotate into body frame
-            cx_rel = cx - x0
-            cy_rel = cy - y0
-            cx_body = cx_rel * cos_a - cy_rel * sin_a  # along chord
-            cy_body = cx_rel * sin_a + cy_rel * cos_a  # perpendicular
-
-            xi_grid = cx_body / chord  # normalised chord pos
-
-            xi_c = np.clip(xi_grid, 0.0, 1.0)
-            C_g = np.sqrt(np.maximum(xi_c, 0.0)) * (1.0 - xi_c)
-
+    subcells = []
+    for si in range(N_SUB):
+        for sj in range(N_SUB):
+            cx = (_JJ + (sj + 0.5) / N_SUB) * CELL_SIZE
+            cy = (_II + (si + 0.5) / N_SUB) * CELL_SIZE
+            cx_rel = cx - AIRFOIL_X0
+            cy_rel = cy - AIRFOIL_Y0
+            # Airfoil is aligned with grid; wind velocity is rotated instead.
+            cx_body = cx_rel.astype(np.float32)
+            cy_body = cy_rel.astype(np.float32)
+            xi_grid = (cx_body / CHORD).astype(np.float32)
+            xi_c = np.clip(xi_grid, 0.0, 1.0).astype(np.float32)
+            C_g = (np.sqrt(np.maximum(xi_c, 0.0)) * (1.0 - xi_c)).astype(np.float32)
             xi_c_col = xi_c[..., None]  # (H, W, 1)
             B_g = (
                 binom * xi_c_col**i_vals * (1.0 - xi_c_col) ** (n_order - i_vals)
+            ).astype(
+                np.float32
             )  # (H, W, N+1)
-
-            y_u_g = C_g * (B_g @ weights_upper)  # (H, W)
-            y_l_g = C_g * (B_g @ weights_lower)  # (H, W)
-
-            # A point is inside if chord position in [0,1] and |y_body| ≤ surface
-            inside = (
-                (xi_grid >= 0.0)
-                & (xi_grid <= 1.0)
-                & (cy_body <= y_u_g * chord)
-                & (cy_body >= y_l_g * chord)
+            subcells.append(
+                dict(
+                    cx_body=jnp.array(cx_body),
+                    cy_body=jnp.array(cy_body),
+                    xi_grid=jnp.array(xi_grid),
+                    C_g=jnp.array(C_g),
+                    B_g=jnp.array(B_g),
+                )
             )
-            solid_accum += inside.astype(np.float32)
+    return subcells
 
-    return jnp.array(solid_accum / (n_sub * n_sub))
+
+_SUBCELL_CACHE: dict = {}
+
+
+def _get_subcell_geometry(aoa_deg: float) -> list[dict]:
+    key = round(aoa_deg, 6)
+    if key not in _SUBCELL_CACHE:
+        _SUBCELL_CACHE[key] = _precompute_subcell_geometry(aoa_deg)
+    return _SUBCELL_CACHE[key]
+
+
+def build_solid_mask_jax(
+    weights_upper: jnp.ndarray,  # (N+1,)  — must be JAX arrays for grad
+    weights_lower: jnp.ndarray,  # (N+1,)
+    subcells: list[dict],
+) -> jnp.ndarray:
+    """
+    Differentiable solid-mask builder.
+
+    All geometry arrays (cx_body, cy_body, C_g, B_g, xi_grid) are JAX
+    constants pre-computed by _precompute_subcell_geometry.  Only the CST
+    weight-to-surface computation is differentiated.
+
+    Uses a *soft* inside indicator:
+        inside = σ(sharpness * (y_upper_body - cy_body))
+                * σ(sharpness * (cy_body - y_lower_body))
+                * in_chord
+
+    where σ is the sigmoid.  The sharpness = 500 makes this numerically
+    identical to the hard step for cells well inside/outside the airfoil,
+    but provides a smooth gradient at the surface (the IBM boundary).
+
+    Returns:
+        solid_mask : jnp float32 array (HEIGHT, WIDTH), values in [0, 1]
+    """
+    sharpness = 500.0
+    scale = CHORD
+    solid_accum = jnp.zeros((HEIGHT, WIDTH), dtype=jnp.float32)
+
+    for sc in subcells:
+        cy_body = sc["cy_body"]  # (H, W) constant
+        C_g = sc["C_g"]  # (H, W) constant
+        B_g = sc["B_g"]  # (H, W, N+1) constant
+        xi_grid = sc["xi_grid"]  # (H, W) constant
+
+        y_u = C_g * (B_g @ weights_upper)  # (H, W)  — differentiable
+        y_l = C_g * (B_g @ weights_lower)  # (H, W)  — differentiable
+
+        y_upper_body = y_u * scale  # physical surface y in body frame
+        y_lower_body = y_l * scale
+
+        # Soft "inside" indicator
+        above_lower = jax.nn.sigmoid(sharpness * (cy_body - y_lower_body))
+        below_upper = jax.nn.sigmoid(sharpness * (y_upper_body - cy_body))
+        in_chord = jax.nn.sigmoid(sharpness * xi_grid) * jax.nn.sigmoid(
+            sharpness * (1.0 - xi_grid)
+        )
+
+        inside = above_lower * below_upper * in_chord
+        solid_accum = solid_accum + inside
+
+    return solid_accum / (N_SUB * N_SUB)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Boundary condition helpers (taken verbatim from RANS benchmark)
+# Wall-distance helper (NOT differentiated — scipy EDT on thresholded mask)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@jax.jit
-def inject_uniform_inlet(
-    state: FluidState, u_inlet: float, v_inlet: float
-) -> FluidState:
-    u = state.velocity.u.at[:, 0:2].set(u_inlet)
-    v = state.velocity.v.at[:, 0:2].set(v_inlet)
-    return state.__class__(
-        density=state.density,
-        velocity=state.velocity.with_values(u, v),
-        pressure=state.pressure,
-        solid_mask=state.solid_mask,
-        sources=state.sources,
-        nu_tilde=state.nu_tilde,
-        time=state.time,
-        step=state.step,
-    )
+def compute_wall_dist_np(solid_mask_jax: jnp.ndarray) -> jnp.ndarray:
+    """
+    Compute wall distance from a JAX solid mask using scipy EDT.
+    Returns a JAX array wrapped in stop_gradient so autodiff ignores it.
+    """
+    solid_np = np.array(solid_mask_jax)
+    solid_np_open = solid_np.copy()
+    solid_np_open[1:-1, -1] = 0.0  # open right edge for outflow
+    wall_dist_np = distance_transform_edt(solid_np_open < 0.5) * CELL_SIZE
+    wall_dist_np = np.maximum(wall_dist_np.astype(np.float32), 1e-10)
+    # stop_gradient: wall_dist is a fixed input to the differentiable graph
+    return jax.lax.stop_gradient(jnp.array(wall_dist_np))
 
 
-@jax.jit
-def apply_slip_top_bottom_bc(state: FluidState) -> FluidState:
-    u = state.velocity.u
-    v = state.velocity.v
-    v = v.at[0, :].set(0.0)
-    v = v.at[-1, :].set(0.0)
-    u = u.at[0, :].set(u[1, :])
-    u = u.at[-1, :].set(u[-2, :])
-    return state.__class__(
-        density=state.density,
-        velocity=state.velocity.with_values(u, v),
-        pressure=state.pressure,
-        solid_mask=state.solid_mask,
-        sources=state.sources,
-        nu_tilde=state.nu_tilde,
-        time=state.time,
-        step=state.step,
-    )
+# ─────────────────────────────────────────────────────────────────────────────
+# Free-stream boundary condition helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 
-@jax.jit
-def apply_outflow_bc(state: FluidState) -> FluidState:
-    u = state.velocity.u.at[:, -1].set(state.velocity.u[:, -2])
-    v = state.velocity.v.at[:, -1].set(state.velocity.v[:, -2])
-    return state.__class__(
-        density=state.density,
-        velocity=state.velocity.with_values(u, v),
-        pressure=state.pressure,
-        solid_mask=state.solid_mask,
-        sources=state.sources,
-        nu_tilde=state.nu_tilde,
-        time=state.time,
-        step=state.step,
-    )
+def _make_apply_freestream_bc(u_inlet: float, v_inlet: float):
+    """
+    Return a JIT-compiled function that imposes free-stream velocity on
+    all four domain boundaries (inlet / top / bottom / outlet).
+    """
+
+    @jax.jit
+    def apply_freestream_bc(state: FluidState) -> FluidState:
+        u = state.velocity.u
+        v = state.velocity.v
+
+        # Left (inlet)
+        u = u.at[:, :2].set(u_inlet)
+        v = v.at[:, :2].set(v_inlet)
+
+        # Right (outlet) — Neumann + free-stream floor
+        u = u.at[:, -1].set(jnp.maximum(u[:, -2], u_inlet * 0.5))
+        v = v.at[:, -1].set(v[:, -2])
+
+        # Top — free-stream
+        u = u.at[-1, :].set(u_inlet)
+        v = v.at[-1, :].set(v_inlet)
+
+        # Bottom — free-stream
+        u = u.at[0, :].set(u_inlet)
+        v = v.at[0, :].set(v_inlet)
+
+        return state.__class__(
+            density=state.density,
+            velocity=state.velocity.with_values(u, v),
+            pressure=state.pressure,
+            solid_mask=state.solid_mask,
+            sources=state.sources,
+            nu_tilde=state.nu_tilde,
+            time=state.time,
+            step=state.step,
+        )
+
+    return apply_freestream_bc
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -261,14 +384,12 @@ def apply_outflow_bc(state: FluidState) -> FluidState:
 
 def make_rans_step(grid: FluidGrid, u_inlet: float, v_inlet: float):
     """
-    Build a JIT-compiled RANS step function.
+    Build a JIT-compiled single RANS step (state, wall_dist) → state.
 
-    wall_dist is an EXPLICIT argument (not closed over from grid._wall_dist).
-    This is critical: closed-over JAX arrays are embedded as XLA constants, so
-    any change to grid._wall_dist would require a full retrace.  By making it an
-    argument, JAX sees the same abstract shape every call and reuses the
-    compiled executable regardless of the concrete wall_dist values.
+    wall_dist is an explicit argument (not closed over) so that JAX never
+    needs to retrace when the wall geometry changes between optimization steps.
     """
+    apply_freestream_bc = _make_apply_freestream_bc(u_inlet, v_inlet)
 
     @jax.jit
     def rans_step(state: FluidState, wall_dist: jnp.ndarray) -> FluidState:
@@ -276,8 +397,7 @@ def make_rans_step(grid: FluidGrid, u_inlet: float, v_inlet: float):
         nu_eff = grid.compute_effective_viscosity(state)
         state = grid.diffuse_velocity(state, num_iters=20, nu_eff_field=nu_eff)
         state = grid.advect_velocity(state)
-        state = inject_uniform_inlet(state, u_inlet, v_inlet)
-        state = apply_slip_top_bottom_bc(state)
+        state = apply_freestream_bc(state)
         u, v = apply_ibm_continuous_forcing(
             state.velocity.u, state.velocity.v, state.solid_mask
         )
@@ -293,9 +413,7 @@ def make_rans_step(grid: FluidGrid, u_inlet: float, v_inlet: float):
         )
         state = grid.solve_pressure(state, num_iters=60)
         state = grid.project_velocity(state)
-        state = inject_uniform_inlet(state, u_inlet, v_inlet)
-        state = apply_slip_top_bottom_bc(state)
-        state = apply_outflow_bc(state)
+        state = apply_freestream_bc(state)
         return state.__class__(
             density=state.density,
             velocity=state.velocity,
@@ -311,23 +429,89 @@ def make_rans_step(grid: FluidGrid, u_inlet: float, v_inlet: float):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Force integration (from RANS benchmark — pressure + viscous)
+# Grid / step cache
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@jax.jit
+def _get_or_build_grid(
+    u_inlet: float, v_inlet: float, nu_lam: float, visualise: bool = False
+):
+    """
+    Return a persistent (FluidGrid, rans_step) pair, JIT-compiling on first
+    call for each (u_inlet, v_inlet, nu_lam) combination.
+    """
+    key = (round(u_inlet, 8), round(v_inlet, 8), round(nu_lam, 12), visualise)
+    if key not in _GRID_CACHE:
+        print(
+            "  [cache miss] Building FluidGrid and compiling rans_step ...",
+            flush=True,
+        )
+        placeholder_mask = jnp.zeros((HEIGHT, WIDTH), dtype=jnp.float32)
+        placeholder_wall_dist = jnp.ones((HEIGHT, WIDTH), dtype=jnp.float32) * (
+            CELL_SIZE * 10
+        )
+
+        # Bounding box for visualization (control volume logic roughly covering airfoil)
+        # Airfoil is spanning [AIRFOIL_X0, AIRFOIL_X0 + CHORD] and centered around AIRFOIL_Y0
+        j1 = max(0, int((AIRFOIL_X0 - 0.05) / CELL_SIZE))
+        j2 = min(WIDTH, int((AIRFOIL_X0 + CHORD + 0.05) / CELL_SIZE))
+        i1 = max(0, int((AIRFOIL_Y0 - 0.15) / CELL_SIZE))
+        i2 = min(HEIGHT, int((AIRFOIL_Y0 + 0.15) / CELL_SIZE))
+        cv_rect = (i1, i2, j1, j2)
+
+        grid = FluidGrid(
+            height=HEIGHT,
+            width=WIDTH,
+            cell_size=CELL_SIZE,
+            dt=DT,
+            diffusion=0.0,
+            viscosity=nu_lam,
+            rho=RHO,
+            boundary_type=0,
+            use_sa_turbulence=False,  # avoid wall-dist scan in __init__
+            visualise=visualise,
+            show_velocity=True,
+            show_cell_property="curl",
+            show_cell_centered_velocity=True,
+            cv_rect=cv_rect,
+        )
+        grid.solid_mask = placeholder_mask
+        grid.use_sa_turbulence = True
+        grid._wall_dist = placeholder_wall_dist
+
+        rans_step = make_rans_step(grid, u_inlet, v_inlet)
+
+        # Warm-up compile
+        state0 = grid.create_initial_state()
+        _ = rans_step(state0, placeholder_wall_dist)
+        jax.block_until_ready(state0.velocity.u)
+        print("  [cache] rans_step compiled and cached.", flush=True)
+
+        _GRID_CACHE[key] = (grid, rans_step)
+
+    return _GRID_CACHE[key]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Aerodynamic force integrator
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 def compute_aerodynamic_forces(
     state: FluidState,
     solid_mask: jnp.ndarray,
-    cell_size: float,
     nu_eff: jnp.ndarray,
     rho: float,
     aoa_rad: float,
 ) -> tuple:
+    """
+    Compute pressure + viscous forces on the airfoil.
+    Fully differentiable: operates only on jnp arrays.
+    """
     u = state.velocity.u
     v = state.velocity.v
     p = state.pressure.values
-    h = cell_size
+    h = CELL_SIZE
     mu = rho * nu_eff
 
     fluid = 1.0 - solid_mask
@@ -377,226 +561,141 @@ def compute_aerodynamic_forces(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RANS evaluator: run simulation, return (C_L, C_D) for given CST weights
-#
-#  The FluidGrid and rans_step are created ONCE per AoA (cached in _GRID_CACHE)
-#  and reused across every call.  Only the solid_mask and wall_dist change
-#  between calls; both are passed as JAX array ARGUMENTS (not captured in
-#  closures / baked as XLA constants), so JAX sees the same abstract shapes
-#  and hits the compiled XLA cache every time.
+# Differentiable RANS loss
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _get_or_build_grid(u_inlet: float, v_inlet: float):
-    """
-    Return a persistent (FluidGrid, rans_step) pair for the given inlet
-    conditions, building and JIT-compiling them on first call.
-
-    Keyed on rounded (u_inlet, v_inlet) so a fixed AoA never rebuilds.
-    """
-    key = (round(u_inlet, 8), round(v_inlet, 8))
-    if key not in _GRID_CACHE:
-        print(
-            "  [cache miss] Building persistent FluidGrid and compiling rans_step ...",
-            flush=True,
-        )
-        # Placeholder solid mask — will be overwritten before every simulation.
-        # We need it to have the right shape for create_initial_state.
-        placeholder_mask = jnp.zeros((HEIGHT, WIDTH), dtype=jnp.float32)
-        placeholder_wall_dist = jnp.ones((HEIGHT, WIDTH), dtype=jnp.float32) * (
-            CELL_SIZE * 10
-        )
-
-        grid = FluidGrid(
-            height=HEIGHT,
-            width=WIDTH,
-            cell_size=CELL_SIZE,
-            dt=DT,
-            diffusion=0.0,
-            viscosity=NU_LAM,
-            rho=RHO,
-            boundary_type=0,
-            use_sa_turbulence=False,  # set manually so __init__ skips wall-dist scan
-            visualise=False,
-        )
-        grid.solid_mask = placeholder_mask
-        grid.use_sa_turbulence = True
-        grid._wall_dist = placeholder_wall_dist
-
-        rans_step = make_rans_step(grid, u_inlet, v_inlet)
-
-        # Warm-up compile: run one step with placeholder state so the XLA
-        # executable is ready before the optimization loop starts.
-        state0 = grid.create_initial_state()
-        _ = rans_step(state0, placeholder_wall_dist)
-        jax.block_until_ready(state0.velocity.u)
-        print("  [cache] rans_step compiled and cached.", flush=True)
-
-        _GRID_CACHE[key] = (grid, rans_step)
-
-    return _GRID_CACHE[key]
-
-
-def evaluate_rans(
-    weights_upper_np: np.ndarray,
-    weights_lower_np: np.ndarray,
+def make_loss_fn(
+    grid: FluidGrid,
+    rans_step,
+    subcells: list[dict],
+    wall_dist_jnp: jnp.ndarray,
+    solid_mask_open_hard: jnp.ndarray,
     aoa_deg: float,
-    verbose: bool = False,
-) -> tuple:
+    nu_lam: float,
+):
     """
-    Run a RANS simulation for the CST airfoil defined by weights at aoa_deg.
+    Build and return a pure-JAX loss function:
 
-    Reuses the persistent FluidGrid / compiled rans_step — no recompilation.
+        loss_fn(params: jnp.ndarray) -> (scalar_loss, (Cl, Cd))
 
-    Returns:
-        (C_L, C_D)  — dimensionless lift and drag coefficients (Python floats)
+    Gradient strategy:
+      - RANS time-stepping uses jax.lax.fori_loop, and we stop_gradient
+        the resulting state.
+      - We compute aerodynamic forces ONLY on the final steady-state
+        flow field, using the differentiable soft_mask.
     """
-    aoa_rad = math.radians(aoa_deg)
-    u_inlet = U_INF * math.cos(aoa_rad)
-    v_inlet = U_INF * math.sin(aoa_rad)
+    aoa_rad = jnp.float32(math.radians(aoa_deg))
     q_inf = 0.5 * RHO * U_INF**2
     ref_area = CHORD
+    u_inlet = float(U_INF * math.cos(math.radians(aoa_deg)))
+    v_inlet = float(U_INF * math.sin(math.radians(aoa_deg)))
+    n_upper = N_ORDER + 1
 
-    # ── Geometry: solid mask + wall distances ─────────────────────────────────
-    solid_mask_jax = build_solid_mask_cst(
-        weights_upper_np,
-        weights_lower_np,
-        HEIGHT,
-        WIDTH,
-        CELL_SIZE,
-        CHORD,
-        AIRFOIL_X0,
-        AIRFOIL_Y0,
-        aoa_deg,
-    )  # returns jnp array from build_solid_mask_cst
+    # Pre-fetch the grid's initial state template; solid_mask will be
+    # overridden dynamically inside the loss.
+    grid.solid_mask = solid_mask_open_hard  # set for create_initial_state
 
-    solid_np = np.array(solid_mask_jax)
-    solid_np_open = solid_np.copy()
-    solid_np_open[1:-1, -1] = 0.0  # open right boundary for outflow
+    def loss_fn(params: jnp.ndarray):
+        weights_upper = params[:n_upper]
+        weights_lower = params[n_upper:]
 
-    wall_dist_np = distance_transform_edt(solid_np_open < 0.5) * CELL_SIZE
-    wall_dist_np = np.maximum(wall_dist_np.astype(np.float32), 1e-10)
-    wall_dist_jnp = jnp.array(wall_dist_np)
-    solid_mask_open = jnp.array(solid_np_open, dtype=jnp.float32)
+        # ── 1. Geometry: differentiable soft-mask ─────────────────────────────
+        soft_mask = build_solid_mask_jax(weights_upper, weights_lower, subcells)
 
-    # ── Retrieve persistent compiled infrastructure ───────────────────────────
-    grid, rans_step = _get_or_build_grid(u_inlet, v_inlet)
+        # Open the right boundary for outflow (stop_gradient on this operation
+        # since the slice modification doesn't carry gradient information we need)
+        soft_mask_open = soft_mask.at[1:-1, -1].set(0.0)
 
-    # Update the grid's solid_mask so create_initial_state uses the right mask
-    # (nu_tilde is seeded to 0 inside solid cells via state.solid_mask).
-    # The RANS step itself receives solid_mask through state, not from grid,
-    # so changing grid.solid_mask is sufficient for correct initialization.
-    grid.solid_mask = solid_mask_open
+        # ── 2. Geometric feasibility loss (fully JAX) ─────────────────────────
+        x_, y_upper_, y_lower_ = generate_cst_coords(
+            weights_upper, weights_lower, num_points=200
+        )
+        thickness = thickness_at_x(y_upper_, y_lower_)
+        geo_loss = crossover_validity_loss(
+            y_upper_, y_lower_
+        ) + thickness_constraint_loss(thickness, MIN_THICKNESS_RATIO, MIN_THICKNESS_X)
 
-    # ── Initial state ─────────────────────────────────────────────────────────
-    state = grid.create_initial_state()
+        # ── 3. Initial fluid state ─────────────────────────────────────────────
+        # We use the hard (thresholded) mask for IBM forcing and nu_tilde
+        # initialisation; gradients don't need to flow through these.
+        hard_mask = jax.lax.stop_gradient(
+            jnp.where(soft_mask_open >= 0.5, jnp.float32(1.0), jnp.float32(0.0))
+        )
 
-    u_init = jnp.ones((HEIGHT, WIDTH + 1)) * u_inlet
-    v_init = jnp.ones((HEIGHT + 1, WIDTH)) * v_inlet
-    u_init, v_init = apply_ibm_continuous_forcing(u_init, v_init, solid_mask_open)
-    state = state.__class__(
-        density=state.density,
-        velocity=state.velocity.with_values(u_init, v_init),
-        pressure=state.pressure,
-        solid_mask=solid_mask_open,  # use the opened mask in state
-        sources=state.sources,
-        nu_tilde=state.nu_tilde,
-        time=0.0,
-        step=0,
-    )
+        u_init = jnp.ones((HEIGHT, WIDTH + 1), dtype=jnp.float32) * u_inlet
+        v_init = jnp.ones((HEIGHT + 1, WIDTH), dtype=jnp.float32) * v_inlet
+        u_init, v_init = apply_ibm_continuous_forcing(u_init, v_init, hard_mask)
 
-    # ── Simulation loop (wall_dist passed as explicit arg — no retrace) ───────
-    Cl_sum, Cd_sum, n_avg = 0.0, 0.0, 0
+        # Create a base state from grid (uses grid.solid_mask = hard mask)
+        base_state = grid.create_initial_state()
 
-    for step in range(1, N_SIM_STEPS + 1):
-        state = rans_step(state, wall_dist_jnp)
+        # Seed SA modified eddy viscosity: 0 inside solid, 5ν in fluid.
+        nu_init = jnp.where(
+            hard_mask > 0.5, jnp.float32(0.0), jnp.float32(5.0 * nu_lam)
+        )
+        nu_tilde_init = base_state.nu_tilde.with_values(nu_init)
 
-        # Time-average the last N_AVG_STEPS steps
-        if step > (N_SIM_STEPS - N_AVG_STEPS):
-            nu_eff = grid.compute_effective_viscosity(state)
-            F_drag, F_lift = compute_aerodynamic_forces(
-                state, solid_mask_open, CELL_SIZE, nu_eff, RHO, aoa_rad
-            )
-            Cl_sum += float(F_lift) / (q_inf * ref_area)
-            Cd_sum += float(F_drag) / (q_inf * ref_area)
-            n_avg += 1
+        # Override with free-stream velocity and the nondifferentiable hard mask
+        state = base_state.__class__(
+            density=base_state.density,
+            velocity=base_state.velocity.with_values(u_init, v_init),
+            pressure=base_state.pressure,
+            solid_mask=hard_mask,  # ← simulation uses hard mask
+            sources=base_state.sources,
+            nu_tilde=nu_tilde_init,
+            time=jnp.float32(0.0),
+            step=jnp.int32(0),
+        )
 
-    Cl = Cl_sum / max(n_avg, 1)
-    Cd = Cd_sum / max(n_avg, 1)
+        # ── 4. RANS time integration ──────────────────────────────────────────
+        wd = wall_dist_jnp  # already stop_grad from compute_wall_dist_np
 
-    return Cl, Cd
+        def step_body(i, s):
+            return rans_step(s, wd)
 
+        final_state = jax.lax.fori_loop(0, N_SIM_STEPS, step_body, state)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Composite scalar loss (used to compute gradients via finite differences)
-#
-#  We use finite-difference (FD) gradients rather than jax.grad because the
-#  full RANS loop involves Python-level control flow and numpy grid construction
-#  that are not JAX-differentiable end-to-end.  This is honest — it avoids
-#  silently wrong gradients from half-traced loops.
-#
-#  If you later move mask construction inside a fully JIT-traced function, you
-#  can switch back to jax.grad for free.
-# ─────────────────────────────────────────────────────────────────────────────
+        # Stop gradient on final state to prevent backpropagation through time
+        final_state = jax.lax.stop_gradient(final_state)
 
+        # ── 5. Aerodynamic loss on final state ────────────────────────────────
+        nu_eff = grid.compute_effective_viscosity(final_state)
+        nu_eff = jax.lax.stop_gradient(nu_eff)
 
-def compute_loss(
-    weights_upper_np: np.ndarray,
-    weights_lower_np: np.ndarray,
-    aoa_deg: float,
-) -> tuple:
-    """
-    Evaluate the scalar optimization loss and auxiliary aerodynamic information.
+        # Calculate forces using differentiable soft mask and constants state fields
+        F_drag, F_lift = compute_aerodynamic_forces(
+            final_state, soft_mask_open, nu_eff, RHO, aoa_rad
+        )
 
-    Loss = W_DRAG * |Cd|  +  W_LIFT * max(0, target_Cl - Cl)  +  W_GEO * geo_penalty
+        Cl = F_lift / (q_inf * ref_area)
+        Cd = F_drag / (q_inf * ref_area)
 
-    Returns:
-        (loss, Cl, Cd)
-    """
-    wu = jnp.array(weights_upper_np)
-    wl = jnp.array(weights_lower_np)
+        # ── 6. Composite loss ─────────────────────────────────────────────────
+        # Objective: Maximize aerodynamic efficiency (Lift/Drag ratio).
+        # To do this, we minimize the inverse L/D ratio: (Cd / Cl).
+        #
+        # Safety: We must clamp Cl in the denominator. If Cl is negative,
+        # minimizing (Cd / Cl) would become more negative by INCREASING Cd!
+        # Clamping prevents this "ratio trap" and division by zero.
+        min_cl = jnp.float32(0.1)
+        safe_cl = jnp.maximum(Cl, min_cl)
 
-    # Geometric feasibility term (differentiable via JAX)
-    x_, y_upper_, y_lower_ = generate_cst_coords(wu, wl, num_points=200)
-    thickness = thickness_at_x(y_upper_, y_lower_)
-    geo_loss = crossover_validity_loss(y_upper_, y_lower_) + thickness_constraint_loss(
-        thickness, MIN_THICKNESS_RATIO, MIN_THICKNESS_X
-    )
+        # Base objective: Inverse L/D ratio
+        inverse_ld = jnp.abs(Cd) / safe_cl
 
-    # Aerodynamic evaluation
-    Cl, Cd = evaluate_rans(weights_upper_np, weights_lower_np, aoa_deg)
+        # Strong penalty to push Cl into positive domain if it starts negative/low
+        low_lift_penalty = jnp.maximum(min_cl - Cl, jnp.float32(0.0))
 
-    # Soft lift target: want Cl > ~0.3 at AoA=4°
-    target_Cl = 0.3
-    lift_penalty = max(0.0, target_Cl - Cl)
+        # Weighting: Use W_DRAG for the ratio, and strongly weight the lift penalty
+        # to ensure the optimizer escapes the clamped region quickly.
+        aero_loss = W_DRAG * inverse_ld + W_LIFT * low_lift_penalty * 10.0
 
-    loss = W_DRAG * abs(Cd) + W_LIFT * lift_penalty + W_GEO * float(geo_loss)
+        total_loss = aero_loss + W_GEO * geo_loss
 
-    return loss, Cl, Cd
+        return total_loss, (Cl, Cd)
 
-
-def finite_difference_gradient(
-    weights: np.ndarray,
-    n_upper: int,
-    aoa_deg: float,
-    eps: float = 1e-3,
-) -> np.ndarray:
-    """
-    Central-difference gradient of the RANS loss w.r.t. CST weight vector.
-
-    NOTE: This runs 2 × len(weights) RANS simulations per call.
-          Set eps large enough (≥1e-3) to avoid numerical noise.
-    """
-    grad = np.zeros_like(weights)
-    for k in range(len(weights)):
-        wp = weights.copy()
-        wp[k] += eps
-        wm = weights.copy()
-        wm[k] -= eps
-        lp, _, _ = compute_loss(wp[:n_upper], wp[n_upper:], aoa_deg)
-        lm, _, _ = compute_loss(wm[:n_upper], wm[n_upper:], aoa_deg)
-        grad[k] = (lp - lm) / (2.0 * eps)
-    return grad
+    return loss_fn
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -611,25 +710,6 @@ def write_dat_file(
     label: str = "Optimized CST Airfoil",
     num_points: int = 200,
 ) -> None:
-    """
-    Write Selig-format .dat file of the airfoil coordinates.
-
-    The file layout expected by xfoil_validation.py / XFoil:
-
-        <label>
-        x1  y1      ← upper surface, TE → LE
-        x2  y2
-        ...
-        xN  yN      ← LE
-        xN+1 yN+1   ← lower surface, LE → TE
-        ...
-
-    Args:
-        weights_upper / weights_lower : CST weights (numpy arrays)
-        filepath  : output .dat path
-        label     : airfoil name printed on line 1
-        num_points: number of points per surface
-    """
     wu = jnp.array(weights_upper)
     wl = jnp.array(weights_lower)
 
@@ -638,7 +718,6 @@ def write_dat_file(
     yu = np.array(y_upper)
     yl = np.array(y_lower)
 
-    # Selig: upper surface TE→LE, then lower surface LE→TE
     x_upper_out = x_np[::-1]
     y_upper_out = yu[::-1]
     x_lower_out = x_np
@@ -676,7 +755,7 @@ def plot_optimization_history(losses, cls, cds, filepath):
     axes[1].grid(True, alpha=0.3)
 
     axes[2].plot(cds, "^-", color="#3498DB", linewidth=2, markersize=5)
-    axes[2].set_ylabel("Drag coefficient  Cd", fontsize=12)
+    axes[2].set_ylabel("Drag coefficient  Cd\n", fontsize=12)
     axes[2].set_xlabel("Optimization iteration", fontsize=12)
     axes[2].grid(True, alpha=0.3)
 
@@ -734,88 +813,185 @@ def plot_shape_comparison(
 
 
 def main():
+    args = parse_args()
+
+    # ── Physics: Re → viscosity ───────────────────────────────────────────────
+    RE = _VALID_RE[args.re]
+    NU_LAM = (U_INF * CHORD) / RE  # ν = 1/Re  (since U_inf = c = 1)
+    AoA_DEG = args.aoa
+    aoa_rad = math.radians(AoA_DEG)
+    u_inlet = U_INF * math.cos(aoa_rad)
+    v_inlet = U_INF * math.sin(aoa_rad)
+
     print()
     print("═" * 70)
     print("  RANS Airfoil Shape Optimization — CST + Spalart-Allmaras")
     print(
         f"  Grid: {HEIGHT}×{WIDTH}  cell={CELL_SIZE*1000:.1f} mm  "
-        f"Re={U_INF/NU_LAM:.1e}  AoA={AoA_DEG}°"
+        f"Re={RE:.2e}  ν={NU_LAM:.3e} m²/s  AoA={AoA_DEG:.1f}°"
+    )
+    print(
+        f"  U_inf={U_INF} m/s  chord={CHORD} m  "
+        f"(u_inlet={u_inlet:.4f}, v_inlet={v_inlet:.4f})"
     )
     print(
         f"  Iterations: {NUM_ITERATIONS}  |  CST order: {N_ORDER}  "
         f"({N_ORDER+1} weights/surface)"
     )
+    print("  Gradient: jax.grad (analytic)  |  Boundaries: free-stream")
     print("═" * 70)
 
-    # ── Initial CST weights (NACA 0012 profile) ──────────────────
+    # ── Initial CST weights (NACA 0012 profile) ───────────────────────────────
     n_weights = N_ORDER + 1
-    initial_upper = np.array([0.1728, 0.1650, 0.1400, 0.1550, 0.1300, 0.1150])
-    initial_lower = -initial_upper  # Ensures perfect symmetry
+    initial_upper = jnp.array([0.1728, 0.1650, 0.1400, 0.1550, 0.1300, 0.1150])
+    initial_lower = -initial_upper  # perfect symmetry
 
     assert (
         len(initial_upper) == n_weights and len(initial_lower) == n_weights
     ), "Weight arrays must have length N_ORDER + 1"
 
-    params = np.concatenate([initial_upper, initial_lower])  # flat numpy vector
+    params = jnp.concatenate([initial_upper, initial_lower])
     n_upper = n_weights
 
-    # ── Adam optimizer state (pure numpy for simplicity outside JAX) ─────────
-    m = np.zeros_like(params)  # first moment
-    v_m = np.zeros_like(params)  # second moment
+    # ── Pre-compute subcell geometry (depends only on AoA, grid constants) ────
+    print("\n  Pre-computing subcell geometry ...")
+    subcells = _get_subcell_geometry(AoA_DEG)
+
+    # ── Build initial hard mask (for wall-dist + IBM; not differentiated) ─────
+    print("  Building initial solid mask ...")
+    init_soft_mask = build_solid_mask_jax(initial_upper, initial_lower, subcells)
+    hard_mask_open = jnp.array(
+        np.where(np.array(init_soft_mask) >= 0.5, 1.0, 0.0), dtype=jnp.float32
+    )
+    hard_mask_open = hard_mask_open.at[1:-1, -1].set(0.0)
+
+    print("  Computing wall distances ...")
+    wall_dist_jnp = compute_wall_dist_np(init_soft_mask)
+
+    # ── Retrieve / build persistent grid + compiled step ─────────────────────
+    grid, rans_step = _get_or_build_grid(
+        u_inlet, v_inlet, NU_LAM, visualise=args.visualise
+    )
+    grid.solid_mask = hard_mask_open  # seed for create_initial_state
+
+    # ── Build differentiable loss function ────────────────────────────────────
+    print("  Building differentiable loss function (this triggers JIT) ...")
+    loss_fn = make_loss_fn(
+        grid, rans_step, subcells, wall_dist_jnp, hard_mask_open, AoA_DEG, NU_LAM
+    )
+
+    # value_and_grad returns (loss, aux), grad simultaneously
+    # has_aux=True because loss_fn returns (scalar, (Cl, Cd))
+    val_and_grad = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
+
+    # ── Adam optimizer state ─────────────────────────────────────────────────
+    m = jnp.zeros_like(params)
+    v_m = jnp.zeros_like(params)
     beta1, beta2, eps_adam = 0.9, 0.999, 1e-8
 
     loss_history, cl_history, cd_history = [], [], []
 
-    print("\n  Evaluating initial design ...")
-    loss0, Cl0, Cd0 = compute_loss(params[:n_upper], params[n_upper:], AoA_DEG)
-    print(f"  Initial → Loss={loss0:.5f}  Cl={Cl0:.4f}  Cd={Cd0:.5f}")
-
-    loss_history.append(loss0)
-    cl_history.append(Cl0)
-    cd_history.append(Cd0)
-
+    # ── Evaluate initial design (also triggers compilation of val_and_grad) ───
+    print("\n  Evaluating initial design (first call compiles the graph) ...")
+    t0 = time.time()
+    (loss0, (Cl0, Cd0)), grad0 = val_and_grad(params)
+    jax.block_until_ready(grad0)
+    compile_time = time.time() - t0
     print(
-        f"\n  Starting optimization ...\n  {'Iter':>5}  {'Loss':>10}  {'Cl':>9}  {'Cd':>9}  {'Cl/Cd':>9}  {'Time(s)':>8}"
+        f"  Initial → Loss={float(loss0):.5f}  Cl={float(Cl0):.4f}  "
+        f"Cd={float(Cd0):.5f}  (compile+eval: {compile_time:.1f}s)"
     )
-    print("  " + "-" * 65)
+
+    if args.visualise:
+        print("\n  Visualisation mode enabled. Starting simulation loop.")
+        print("  Close the window or press ESC to exit.")
+        import pygame
+
+        clock = pygame.time.Clock()
+        running = True
+
+        # Build initial state directly
+        base_state = grid.create_initial_state()
+        nu_init = jnp.where(hard_mask_open > 0.5, 0.0, 5.0 * NU_LAM)
+        nu_tilde_init = base_state.nu_tilde.with_values(nu_init)
+
+        u_init = jnp.ones((HEIGHT, WIDTH + 1), dtype=jnp.float32) * u_inlet
+        v_init = jnp.ones((HEIGHT + 1, WIDTH), dtype=jnp.float32) * v_inlet
+        u_init, v_init = apply_ibm_continuous_forcing(u_init, v_init, hard_mask_open)
+
+        state = base_state.__class__(
+            density=base_state.density,
+            velocity=base_state.velocity.with_values(u_init, v_init),
+            pressure=base_state.pressure,
+            solid_mask=hard_mask_open,
+            sources=base_state.sources,
+            nu_tilde=nu_tilde_init,
+            time=jnp.float32(0.0),
+            step=jnp.int32(0),
+        )
+
+        while running:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    running = False
+
+            state = rans_step(state, wall_dist_jnp)
+            grid.draw_state(state)
+            clock.tick(120)
+
+        pygame.quit()
+        return
+
+    loss_history.append(float(loss0))
+    cl_history.append(float(Cl0))
+    cd_history.append(float(Cd0))
+
+    header = (
+        f"  {'Iter':>5}  {'Loss':>10}  {'Cl':>9}  {'Cd':>9}  "
+        f"{'Cl/Cd':>9}  {'|grad|':>9}  {'Time(s)':>8}"
+    )
+    print(f"\n  Starting optimization ...\n{header}")
+    print("  " + "-" * 73)
 
     t_start = time.time()
 
     for it in range(1, NUM_ITERATIONS + 1):
         t_iter = time.time()
 
-        # Finite-difference gradient
-        grad = finite_difference_gradient(params, n_upper, AoA_DEG)
+        # ── Analytic gradient via jax.grad ────────────────────────────────────
+        (loss_val, (Cl, Cd)), grad = val_and_grad(params)
+        jax.block_until_ready(grad)
 
-        # Adam update
+        loss_history.append(float(loss_val))
+        cl_history.append(float(Cl))
+        cd_history.append(float(Cd))
+
+        # ── Adam update ───────────────────────────────────────────────────────
         m = beta1 * m + (1.0 - beta1) * grad
         v_m = beta2 * v_m + (1.0 - beta2) * grad**2
         m_hat = m / (1.0 - beta1**it)
         v_hat = v_m / (1.0 - beta2**it)
-        params = params - LEARNING_RATE * m_hat / (np.sqrt(v_hat) + eps_adam)
+        params = params - LEARNING_RATE * m_hat / (jnp.sqrt(v_hat) + eps_adam)
 
-        # Evaluate updated design
-        loss_val, Cl, Cd = compute_loss(params[:n_upper], params[n_upper:], AoA_DEG)
-        loss_history.append(loss_val)
-        cl_history.append(Cl)
-        cd_history.append(Cd)
-
-        cl_cd_ratio = Cl / Cd if abs(Cd) > 1e-12 else 0.0
+        cl_cd_ratio = float(Cl) / float(Cd) if abs(float(Cd)) > 1e-12 else 0.0
+        grad_norm = float(jnp.linalg.norm(grad))
         elapsed = time.time() - t_iter
 
         print(
-            f"  {it:>5}  {loss_val:>10.5f}  {Cl:>9.4f}  {Cd:>9.5f}"
-            f"  {cl_cd_ratio:>9.3f}  {elapsed:>8.1f}s"
+            f"  {it:>5}  {float(loss_val):>10.5f}  {float(Cl):>9.4f}  {float(Cd):>9.5f}"
+            f"  {cl_cd_ratio:>9.3f}  {grad_norm:>9.4f}  {elapsed:>8.1f}s"
         )
 
     total_time = time.time() - t_start
-    print("  " + "-" * 65)
+    print("  " + "-" * 73)
     print(f"\n  Total wall-clock time: {total_time/60:.1f} min")
 
-    final_upper = params[:n_upper]
-    final_lower = params[n_upper:]
+    final_upper = np.array(params[:n_upper])
+    final_lower = np.array(params[n_upper:])
 
-    # Summary
+    # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\n  {'Metric':<20} {'Initial':>10}  {'Final':>10}")
     print(f"  {'─'*42}")
     print(f"  {'Loss':<20} {loss_history[0]:>10.5f}  {loss_history[-1]:>10.5f}")
@@ -829,7 +1005,7 @@ def main():
     )
     print(f"\n  Loss reduction : {drag_red:.1f}%")
 
-    # ── Export .dat file ─────────────────────────────────────────────────────
+    # ── Export .dat file ──────────────────────────────────────────────────────
     print("\n  Writing XFoil-compatible .dat file ...")
     write_dat_file(
         final_upper,
@@ -837,7 +1013,7 @@ def main():
         filepath=OUTPUT_DAT,
         label=(
             f"RANS-Optimized CST Airfoil  "
-            f"AoA={AoA_DEG}deg  Re={U_INF/NU_LAM:.0e}  "
+            f"AoA={AoA_DEG:.1f}deg  Re={RE:.2e}  "
             f"Cl={cl_history[-1]:.4f}  Cd={cd_history[-1]:.5f}"
         ),
     )
@@ -845,12 +1021,12 @@ def main():
     print(f'    input_file  = "{OUTPUT_DAT}"')
     print('    output_polar = "optimized_airfoil_polar.txt"')
 
-    # ── Plots ────────────────────────────────────────────────────────────────
+    # ── Plots ─────────────────────────────────────────────────────────────────
     print("\n  Generating plots ...")
     plot_optimization_history(loss_history, cl_history, cd_history, OUTPUT_HIST)
     plot_shape_comparison(
-        initial_upper,
-        initial_lower,
+        np.array(initial_upper),
+        np.array(initial_lower),
         final_upper,
         final_lower,
         OUTPUT_SHAPE,
