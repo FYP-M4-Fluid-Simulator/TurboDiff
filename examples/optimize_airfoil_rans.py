@@ -74,6 +74,7 @@ from turbodiff.core.utils import apply_ibm_continuous_forcing
 from turbodiff.core.airfoil import (
     generate_cst_coords,
     thickness_at_x,
+    max_thickness,
 )
 from turbodiff.core.loss_functions import (
     thickness_constraint_loss,
@@ -122,8 +123,8 @@ LEARNING_RATE = 0.005
 N_ORDER = 5  # CST polynomial order — 6 weights per surface
 
 # Geometry constraints
-MIN_THICKNESS_RATIO = 0.06  # t/c must exceed this somewhere
-MIN_THICKNESS_X = 0.25  # at this chord location
+MIN_THICKNESS_RATIO = 0.10  # t/c must exceed this somewhere
+MAX_THICKNESS_RATIO = 0.25  # t/c must not exceed this anywhere
 
 # Loss weights
 W_DRAG = 1.0  # drag minimization
@@ -614,7 +615,9 @@ def make_loss_fn(
         thickness = thickness_at_x(y_upper_, y_lower_)
         geo_loss = crossover_validity_loss(
             y_upper_, y_lower_
-        ) + thickness_constraint_loss(thickness, MIN_THICKNESS_RATIO, MIN_THICKNESS_X)
+        ) + thickness_constraint_loss(
+            thickness, MIN_THICKNESS_RATIO, MAX_THICKNESS_RATIO
+        )
 
         # ── 3. Initial fluid state ─────────────────────────────────────────────
         # We use the hard (thresholded) mask for IBM forcing and nu_tilde
@@ -1000,6 +1003,12 @@ def main():
     cl_cd_0 = cl_history[0] / cd_history[0] if abs(cd_history[0]) > 1e-12 else 0
     cl_cd_f = cl_history[-1] / cd_history[-1] if abs(cd_history[-1]) > 1e-12 else 0
     print(f"  {'Cl/Cd':<20} {cl_cd_0:>10.3f}  {cl_cd_f:>10.3f}")
+
+    _, yu_i, yl_i = generate_cst_coords(initial_upper, initial_lower)
+    _, yu_f, yl_f = generate_cst_coords(params[:n_upper], params[n_upper:])
+    max_t_0 = float(max_thickness(yu_i, yl_i))
+    max_t_f = float(max_thickness(yu_f, yl_f))
+    print(f"  {'Max Thickness':<20} {max_t_0:>10.4f}  {max_t_f:>10.4f}")
     drag_red = (
         (1.0 - loss_history[-1] / loss_history[0]) * 100 if loss_history[0] != 0 else 0
     )
