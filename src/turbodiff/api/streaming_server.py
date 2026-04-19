@@ -8,8 +8,9 @@ from typing import Dict, List, Tuple
 from uuid import uuid4
 
 import jax.numpy as jnp
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Depends
 from pydantic import BaseModel, Field
+from turbodiff.api.auth import get_current_user, verify_websocket_token
 
 from turbodiff.core.airfoil_optimization import (
     compute_grid_coordinates,
@@ -44,10 +45,12 @@ CELL_SIZE_MAP: Dict[str, float] = {
 
 router = APIRouter()
 _SESSIONS: Dict[str, "SessionConfig"] = {}
+_SIMULATION_RESULTS: Dict[str, dict] = {}
+
 
 
 class SessionRequest(BaseModel):
-    user_id: str = Field(..., description="User identifier")
+    user_id: str | None = Field(None, description="User identifier")
     fidelity: str = Field("medium", description="low | medium | coarse")
     sim_time: float = Field(0.0, ge=0.0, description="Seconds; 0 for infinite")
     dt: float = Field(0.01, gt=0.0)
@@ -126,16 +129,17 @@ def _extract_cell_fields(state, cell_size):
     u_center = 0.5 * (u[:, :-1] + u[:, 1:])
     v_center = 0.5 * (v[:-1, :] + v[1:, :])
     curl = _compute_curl(u, v, cell_size)
-    return u_center, v_center, curl, state.pressure.values, state.solid_mask
+    return u_center, v_center, curl, state.pressure.values, state.solid_mask, state.density.values
 
 
 @router.get("/health")
 def health_check():
-    return {"status": "ok"}
+    return {"status": "healthy"}
 
 
 @router.post("/sessions")
-def create_session(request: SessionRequest):
+def create_session(request: SessionRequest, user: dict = Depends(get_current_user)):
+    user_id = user.get("uid")
     try:
         height, width = _get_fidelity(request.fidelity)
     except ValueError as exc:
@@ -161,7 +165,7 @@ def create_session(request: SessionRequest):
     session_id = str(uuid4())
     config = SessionConfig(
         session_id=session_id,
-        user_id=request.user_id,
+        user_id=user_id,
         height=height,
         width=width,
         sim_time=request.sim_time,
@@ -200,7 +204,7 @@ def create_session(request: SessionRequest):
         storage = repo.create_session_with_airfoil(
             SessionCreatePayload(
                 session_id=session_id,
-                user_id=request.user_id,
+                user_id=user_id,
                 session_type="simulate",
                 parameters=parameters,
                 cst_weights_upper=request.cst_upper or [],
@@ -222,48 +226,21 @@ def create_session(request: SessionRequest):
     }
 
 
-class SimulationSaveRequest(BaseModel):
-    user_id: str = Field(..., description="User identifier")
-    cl: float | None = None
-    cd: float | None = None
-    lift: float | None = None
-    drag: float | None = None
-    angle_of_attack: float | None = None
-
-
-@router.post("/sessions/{session_id}/save")
-def save_simulation_metrics(session_id: str, request: SimulationSaveRequest):
-    repo = get_storage_repository()
-    try:
-        airfoil = repo.update_simulation_metrics(
-            SimulationMetricsUpdate(
-                session_id=session_id,
-                user_id=request.user_id,
-                cl=request.cl,
-                cd=request.cd,
-                lift=request.lift,
-                drag=request.drag,
-                angle_of_attack=request.angle_of_attack,
-            )
-        )
-    except ValueError as exc:
-        detail = str(exc)
-        status = 404 if "no matching airfoil" in detail else 400
-        raise HTTPException(status_code=status, detail=detail) from exc
-
-    return {"airfoil_id": airfoil.id}
-
-
 @router.websocket("/ws/{session_id}")
 async def stream_state(ws: WebSocket, session_id: str):
-    config = _SESSIONS.get(session_id)
-    if config is None:
-        await ws.accept()
-        await ws.send_json({"error": "unknown session_id"})
+    await ws.accept()
+
+    user = await verify_websocket_token(ws)
+    if user is None:
+        await ws.send_json({"error": "Missing or invalid authentication token"})
         await ws.close(code=1008)
         return
 
-    await ws.accept()
+    config = _SESSIONS.get(session_id)
+    if config is None:
+        await ws.send_json({"error": "unknown session_id"})
+        await ws.close(code=1008)
+        return
 
     if config.cst_upper is None or config.cst_lower is None:
         await ws.send_json({"error": "Missing weights in session config"})
@@ -386,7 +363,7 @@ async def stream_state(ws: WebSocket, session_id: str):
                 # Avoid division by zero for L/D
                 l_d = cl / cd if abs(cd) > 1e-9 else 0.0
 
-                u_center, v_center, curl, pressure, solid = _extract_cell_fields(
+                u_center, v_center, curl, pressure, solid, density = _extract_cell_fields(
                     state, config.cell_size
                 )
                 payload = {
@@ -410,9 +387,11 @@ async def stream_state(ws: WebSocket, session_id: str):
                         "curl": jnp.asarray(curl).tolist(),
                         "pressure": jnp.asarray(pressure).tolist(),
                         "solid": jnp.asarray(solid).astype(int).tolist(),
+                        "tracer": jnp.asarray(density).tolist(),
                     },
                 }
                 await ws.send_json(payload)
+                _SIMULATION_RESULTS[session_id] = payload
 
             if config.stream_fps > 0:
                 await asyncio.sleep(1.0 / config.stream_fps)
@@ -443,4 +422,84 @@ async def stream_state(ws: WebSocket, session_id: str):
                 )
             except Exception as e:
                 print(f"Failed to auto-save simulation metrics for session {session_id}: {e}")
+
+@router.get("/sessions/{session_id}/result")
+def get_simulation_result(session_id: str, user: dict = Depends(get_current_user)):
+    """Get the simulation result from cache or db."""
+    user_id = user.get("uid")
+
+    # 1. Check in-memory cache first
+    if session_id in _SIMULATION_RESULTS:
+        config = _SESSIONS.get(session_id)
+        if config and config.user_id != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized to access this session")
+        return _SIMULATION_RESULTS[session_id]
+
+    # 2. Fallback to database
+    repo = get_storage_repository()
+
+    session_record = repo.get_session(session_id)
+    if not session_record:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session_record.session_type != "simulate":
+        raise HTTPException(status_code=400, detail="This session is not a simulation session")
+
+    airfoil = repo.get_latest_airfoil(session_id, is_optimized=False)
+    if not airfoil:
+        raise HTTPException(status_code=404, detail="Simulation result not found for this session")
+
+    if str(airfoil.created_by_user_id) != str(user_id):
+        raise HTTPException(status_code=403, detail="Not authorized to access this session")
+
+    # 3. Resolve grid parameters: prefer in-memory config, fallback to DB session parameters
+    config = _SESSIONS.get(session_id)
+    if config:
+        height = config.height
+        width = config.width
+        cell_size = config.cell_size
+        chord_length = config.chord_length
+        airfoil_offset_x = config.airfoil_offset_x
+        airfoil_offset_y = config.airfoil_offset_y
+    else:
+        # Server was restarted — extract from the stored session parameters
+        resolved = (session_record.parameters or {}).get("resolved", {})
+        height = resolved.get("height", 0)
+        width = resolved.get("width", 0)
+        cell_size = resolved.get("cell_size", 0.0)
+        chord_length = resolved.get("chord_length", 0.0)
+        airfoil_offset_x = resolved.get("airfoil_offset_x", 0.0)
+        airfoil_offset_y = resolved.get("airfoil_offset_y", 0.0)
+
+    cl = airfoil.cl if airfoil.cl is not None else 0.0
+    cd = airfoil.cd if airfoil.cd is not None else 0.0
+    l_d = cl / cd if abs(cd) > 1e-9 else 0.0
+
+    payload = {
+        "meta": {
+            "session_id": session_id,
+            "height": height,
+            "width": width,
+            "cell_size": cell_size,
+            "chord_length": chord_length,
+            "airfoil_offset_x": airfoil_offset_x,
+            "airfoil_offset_y": airfoil_offset_y,
+            "time": 0.0,
+            "step": 0,
+            "cl": cl,
+            "cd": cd,
+            "l_d": l_d,
+        },
+        "fields": {
+            "u": [],
+            "v": [],
+            "curl": [],
+            "pressure": [],
+            "solid": [],
+            "tracer": [],
+        },
+    }
+
+    _SIMULATION_RESULTS[session_id] = payload
+    print("Payload of   session " + session_id + " is: ", payload)
+    return payload
 

@@ -6,12 +6,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from turbodiff.api import (
-    validation_server,
-    validation_server_cst,
     streaming_server,
     cst_routes,
     optimization_server,
+    powerCalculation_routes
 )
+
 from turbodiff.db.storage import configure_storage_from_env
 
 FIDELITY_MAP: Dict[str, Tuple[int, int]] = {
@@ -20,7 +20,9 @@ FIDELITY_MAP: Dict[str, Tuple[int, int]] = {
     "coarse": (256, 512),
 }
 
-app = FastAPI(title="TurboDiff Streaming API")
+app = FastAPI(
+    title="TurboDiff Streaming API",
+)
 
 
 @app.on_event("startup")
@@ -36,8 +38,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(validation_server.router)
-app.include_router(validation_server_cst.router)
 app.include_router(cst_routes.router)
 app.include_router(streaming_server.router)
 app.include_router(optimization_server.router)
+app.include_router(powerCalculation_routes.router)
