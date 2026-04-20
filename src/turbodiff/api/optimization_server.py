@@ -7,9 +7,15 @@ results (shape, CL, CD, CL/CD, drag, loss) over WebSocket.
 from __future__ import annotations
 
 import asyncio
+import math
+import os
+import logging
 from dataclasses import asdict, dataclass
 from typing import Dict, List, Tuple
 from uuid import uuid4
+
+import numpy as np
+from scipy.ndimage import distance_transform_edt
 
 import jax
 import jax.numpy as jnp
@@ -28,6 +34,8 @@ from turbodiff.core.loss_functions import (
 )
 from turbodiff.core.optimization import create_optimizer
 from turbodiff.core.fluid_grid_jax import FluidGrid
+from turbodiff.core.utils import apply_ibm_continuous_forcing
+from turbodiff.xfoil import run_xfoil, write_dat_file
 from turbodiff.db.storage import (
     OptimizedAirfoilPayload,
     SessionCreatePayload,
@@ -54,6 +62,8 @@ CELL_SIZE_MAP: Dict[str, float] = {
     "high": 0.02,
     "ultra": 0.01,
 }
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/optimize", tags=["optimization"])
 
@@ -93,7 +103,7 @@ class OptSessionRequest(BaseModel):
     dt: float = Field(0.05, gt=0.0)
     diffusion: float = Field(0.001, ge=0.0)
     inflow_velocity: float = Field(1.0, ge=0.0)
-    num_sim_steps: int = Field(80, ge=1, description="Sim steps per iteration")
+    num_sim_steps: int = Field(500, ge=1, description="Sim steps per iteration")
 
     # Airfoil placement
     chord_length: float | None = Field(
@@ -112,18 +122,25 @@ class OptSessionRequest(BaseModel):
     min_thickness: float = Field(0.06, ge=0.0)
     max_thickness: float = Field(0.25, gt=0.0)
 
-    # Objective weights
-    w_lift: float = Field(1000.0, ge=0.0)
-    w_drag: float = Field(100.0, ge=0.0)
-    w_ratio: float = Field(100.0, ge=0.0)
+    # Objective weights (strictly matching optimize_naca_suite.py)
+    w_lift: float = Field(0.5, ge=0.0)
+    w_drag: float = Field(1.0, ge=0.0)
+    w_ratio: float = Field(10.0, ge=0.0)
 
     # CST generation
     num_cst_points: int = Field(100, ge=10)
-    mask_sharpness: float = Field(50.0, gt=0.0)
+    mask_sharpness: float = Field(500.0, gt=0.0)
 
     # Angle of attack
     angle_of_attack: float = Field(
         0.0, description="Degrees; rotates airfoil, wind stays horizontal"
+    )
+
+    # Reynolds number — when provided, derives viscosity: ν = inflow_velocity × chord / Re
+    reynolds_number: float | None = Field(
+        None,
+        gt=0.0,
+        description="Reynolds number (e.g. 1e6). Overrides diffusion-based viscosity.",
     )
 
     # Streaming
@@ -158,6 +175,7 @@ class OptSessionConfig:
     num_cst_points: int
     mask_sharpness: float
     angle_of_attack: float
+    reynolds_number: float | None
     stream_fps: float
 
 
@@ -180,7 +198,9 @@ def _get_fidelity(fidelity: str) -> Tuple[int, int]:
 
 
 @router.post("/sessions")
-def create_opt_session(request: OptSessionRequest, user: dict = Depends(get_current_user)):
+def create_opt_session(
+    request: OptSessionRequest, user: dict = Depends(get_current_user)
+):
     """Create a new optimization session and return its ID."""
     user_id = user.get("uid")
 
@@ -200,6 +220,14 @@ def create_opt_session(request: OptSessionRequest, user: dict = Depends(get_curr
     airfoil_offset_x = request.airfoil_offset_x or (30 * cell_size)
     airfoil_offset_y = request.airfoil_offset_y or (height // 2 * cell_size)
 
+    # Resolve viscosity from Reynolds number when provided.
+    # ν = U_inf × chord / Re  (matches optimize_naca_suite.py convention)
+    resolved_diffusion = request.diffusion
+    if request.reynolds_number and request.reynolds_number > 0:
+        resolved_diffusion = (
+            request.inflow_velocity * chord_length
+        ) / request.reynolds_number
+
     session_id = str(uuid4())
     config = OptSessionConfig(
         session_id=session_id,
@@ -210,7 +238,7 @@ def create_opt_session(request: OptSessionRequest, user: dict = Depends(get_curr
         cst_lower=request.cst_lower,
         cell_size=cell_size,
         dt=request.dt,
-        diffusion=request.diffusion,
+        diffusion=resolved_diffusion,
         inflow_velocity=request.inflow_velocity,
         num_sim_steps=request.num_sim_steps,
         chord_length=chord_length,
@@ -228,6 +256,7 @@ def create_opt_session(request: OptSessionRequest, user: dict = Depends(get_curr
         num_cst_points=request.num_cst_points,
         mask_sharpness=request.mask_sharpness,
         angle_of_attack=request.angle_of_attack,
+        reynolds_number=request.reynolds_number,
         stream_fps=request.stream_fps,
     )
     _OPT_SESSIONS[session_id] = config
@@ -242,6 +271,8 @@ def create_opt_session(request: OptSessionRequest, user: dict = Depends(get_curr
             "chord_length": chord_length,
             "airfoil_offset_x": airfoil_offset_x,
             "airfoil_offset_y": airfoil_offset_y,
+            "diffusion": resolved_diffusion,
+            "reynolds_number": request.reynolds_number,
         },
     }
     try:
@@ -271,24 +302,102 @@ def create_opt_session(request: OptSessionRequest, user: dict = Depends(get_curr
 
 
 def _build_optimization_fns(config: OptSessionConfig):
-    """Build the loss/grad functions (pure, no async). Returns closures."""
+    """Build the loss/grad functions (pure, no async). Returns closures.
+
+    Uses the full Spalart-Allmaras RANS pipeline (matching optimize_airfoil_rans.py):
+      1. Build differentiable soft mask from CST weights
+      2. Threshold → hard mask → wall distance (stop_gradient)
+      3. Run N_SIM_STEPS of RANS (fori_loop, stop_gradient on final state)
+      4. Compute pressure + viscous forces using the soft mask (gradients flow here)
+    """
 
     n_weights = len(config.cst_upper)
+    nu_lam = (
+        config.diffusion
+    )  # kinematic viscosity (derived from Re on session creation)
+    u_inlet = float(
+        config.inflow_velocity * math.cos(math.radians(config.angle_of_attack))
+    )
+    v_inlet = float(
+        config.inflow_velocity * math.sin(math.radians(config.angle_of_attack))
+    )
+    aoa_rad = jnp.float32(math.radians(config.angle_of_attack))
+    q_inf = 0.5 * 1.0 * config.inflow_velocity**2  # rho=1
 
     grid_x, grid_y = compute_grid_coordinates(
         config.height, config.width, config.cell_size
     )
 
-    # Rotate the airfoil by rotating the grid sample coords in the opposite
-    # direction around the airfoil's midpoint (same approach as streaming_server).
-    pivot_x = config.airfoil_offset_x + config.chord_length / 2.0
-    pivot_y = config.airfoil_offset_y
-    angle_rad = float(jnp.deg2rad(config.angle_of_attack))
-    cos_a, sin_a = jnp.cos(angle_rad), jnp.sin(angle_rad)
-    dx = grid_x - pivot_x
-    dy = grid_y - pivot_y
-    grid_x_rot = cos_a * dx + sin_a * dy + pivot_x
-    grid_y_rot = -sin_a * dx + cos_a * dy + pivot_y
+    # Use original grid coords (airfoil stays horizontal; wind vector is rotated)
+    grid_x_rot = grid_x
+    grid_y_rot = grid_y
+
+    # Build the RANS grid once (cached across iterations)
+    rans_grid = FluidGrid(
+        height=config.height,
+        width=config.width,
+        cell_size=config.cell_size,
+        dt=config.dt,
+        diffusion=0.0,
+        viscosity=nu_lam,
+        boundary_type=0,
+        use_sa_turbulence=True,
+        visualise=False,
+    )
+    rans_grid.use_sa_turbulence = True
+
+    # Free-stream BC helper (applied after each RANS step)
+    @jax.jit
+    def apply_freestream_bc(state):
+        u = state.velocity.u
+        v = state.velocity.v
+        u = (
+            u.at[:, :2]
+            .set(u_inlet)
+            .at[:, -1]
+            .set(jnp.maximum(u[:, -2], u_inlet * 0.5))
+            .at[-1, :]
+            .set(u_inlet)
+            .at[0, :]
+            .set(u_inlet)
+        )
+        v = (
+            v.at[:, :2]
+            .set(v_inlet)
+            .at[:, -1]
+            .set(v[:, -2])
+            .at[-1, :]
+            .set(v_inlet)
+            .at[0, :]
+            .set(v_inlet)
+        )
+        return state.__class__(
+            **{**state.__dict__, "velocity": state.velocity.with_values(u, v)}
+        )
+
+    @jax.jit
+    def rans_step(state, wall_dist):
+        state = rans_grid.step_sa_turbulence(state, wall_dist, num_diff_iters=4)
+        nu_eff = rans_grid.compute_effective_viscosity(state)
+        state = rans_grid.diffuse_velocity(state, num_iters=20, nu_eff_field=nu_eff)
+        state = rans_grid.advect_velocity(state)
+        state = apply_freestream_bc(state)
+        u, v = apply_ibm_continuous_forcing(
+            state.velocity.u, state.velocity.v, state.solid_mask
+        )
+        state = state.__class__(
+            **{**state.__dict__, "velocity": state.velocity.with_values(u, v)}
+        )
+        state = rans_grid.solve_pressure(state, num_iters=60)
+        state = rans_grid.project_velocity(state)
+        state = apply_freestream_bc(state)
+        return state.__class__(
+            **{
+                **state.__dict__,
+                "time": state.time + rans_grid.dt,
+                "step": state.step + 1,
+            }
+        )
 
     def _create_mask(weights_upper, weights_lower):
         return create_airfoil_solid_mask(
@@ -303,11 +412,64 @@ def _build_optimization_fns(config: OptSessionConfig):
             sharpness=config.mask_sharpness,
         )
 
-    def compute_loss_with_aux(params):
+    def _wall_dist_from_mask(hard_mask: jnp.ndarray) -> jnp.ndarray:
+        """Compute wall distance via scipy EDT (not differentiated)."""
+        solid_np = np.array(hard_mask)
+        solid_np[1:-1, -1] = 0.0  # open outflow
+        wd_np = distance_transform_edt(solid_np < 0.5) * config.cell_size
+        return jax.lax.stop_gradient(
+            jnp.array(np.maximum(wd_np.astype(np.float32), 1e-10))
+        )
+
+    def _compute_forces(state, soft_mask_open, nu_eff):
+        """Pressure + viscous forces on the airfoil (differentiable)."""
+        u, v, p = state.velocity.u, state.velocity.v, state.pressure.values
+        h = config.cell_size
+        mu = nu_eff  # rho=1
+        fluid = 1.0 - soft_mask_open
+        is_right = fluid[:, :-1] * soft_mask_open[:, 1:]
+        is_left = fluid[:, 1:] * soft_mask_open[:, :-1]
+        is_bot = fluid[:-1, :] * soft_mask_open[1:, :]
+        is_top = fluid[1:, :] * soft_mask_open[:-1, :]
+        Fpx = jnp.sum(p[:, :-1] * is_right) * h - jnp.sum(p[:, 1:] * is_left) * h
+        Fpy = jnp.sum(p[:-1, :] * is_bot) * h - jnp.sum(p[1:, :] * is_top) * h
+        u_cc = 0.5 * (u[:, :-1] + u[:, 1:])
+        v_cc = 0.5 * (v[:-1, :] + v[1:, :])
+        dudy = jnp.zeros_like(p).at[1:-1, :].set((u_cc[2:, :] - u_cc[:-2, :]) / (2 * h))
+        dvdx = jnp.zeros_like(p).at[:, 1:-1].set((v_cc[:, 2:] - v_cc[:, :-2]) / (2 * h))
+        dudx = jnp.zeros_like(p).at[:, 1:-1].set((u_cc[:, 2:] - u_cc[:, :-2]) / (2 * h))
+        dvdy = jnp.zeros_like(p).at[1:-1, :].set((v_cc[2:, :] - v_cc[:-2, :]) / (2 * h))
+        tau_xy = mu * (dudy + dvdx)
+        tau_xx = 2.0 * mu * dudx
+        tau_yy = 2.0 * mu * dvdy
+        Fvx = (
+            jnp.sum(tau_xx[:, :-1] * is_right) * h
+            - jnp.sum(tau_xx[:, 1:] * is_left) * h
+            + jnp.sum(tau_xy[:-1, :] * is_bot) * h
+            - jnp.sum(tau_xy[1:, :] * is_top) * h
+        )
+        Fvy = (
+            jnp.sum(tau_xy[:, :-1] * is_right) * h
+            - jnp.sum(tau_xy[:, 1:] * is_left) * h
+            + jnp.sum(tau_yy[:-1, :] * is_bot) * h
+            - jnp.sum(tau_yy[1:, :] * is_top) * h
+        )
+        Fx, Fy = Fpx + Fvx, Fpy + Fvy
+        cos_a2, sin_a2 = jnp.cos(aoa_rad), jnp.sin(aoa_rad)
+        F_drag = Fx * cos_a2 + Fy * sin_a2
+        F_lift = -Fx * sin_a2 + Fy * cos_a2
+        return F_drag, F_lift
+
+    def compute_loss_with_aux(params, hard_mask, wd):
+        """Loss function matching optimize_naca_suite.py exactly.
+
+        hard_mask and wd are computed OUTSIDE this function each iteration
+        (via scipy EDT, which cannot run inside JAX's trace).
+        """
         weights_upper = params[:n_weights]
         weights_lower = params[n_weights:]
 
-        # Geometric constraints (mirrors optimize_airfoil.py exactly)
+        # ── 1. Geometric constraints ───────────────────────────────────────────
         x_cst, y_upper, y_lower = generate_cst_coords(weights_upper, weights_lower)
         thickness = thickness_at_x(y_upper, y_lower)
         geo_loss = crossover_validity_loss(
@@ -316,68 +478,92 @@ def _build_optimization_fns(config: OptSessionConfig):
             thickness, config.min_thickness, config.max_thickness
         )
 
-        obstacle_mask = _create_mask(weights_upper, weights_lower)
+        # ── 2. Soft mask (differentiable, for force gradients) ────────────────
+        soft_mask = _create_mask(weights_upper, weights_lower)
+        soft_mask_open = soft_mask.at[1:-1, -1].set(0.0)
 
-        sim = FluidGrid(
-            height=config.height,
-            width=config.width,
-            cell_size=config.cell_size,
-            dt=config.dt,
-            diffusion=config.diffusion,
-            boundary_type=2,
-            visualise=False,
+        # ── 3. RANS initial state (uses hard_mask from caller) ───────────────
+        rans_grid.solid_mask = hard_mask
+        rans_grid._wall_dist = wd
+
+        u_init = (
+            jnp.ones((config.height, config.width + 1), dtype=jnp.float32) * u_inlet
+        )
+        v_init = (
+            jnp.ones((config.height + 1, config.width), dtype=jnp.float32) * v_inlet
+        )
+        u_init, v_init = apply_ibm_continuous_forcing(u_init, v_init, hard_mask)
+
+        base_state = rans_grid.create_initial_state()  # seeds nu_tilde at 5ν in fluid
+        nu_init = jnp.where(
+            hard_mask > 0.5, jnp.float32(0.0), jnp.float32(5.0 * nu_lam)
+        )
+        nu_tilde_init = base_state.nu_tilde.with_values(nu_init)
+        state = base_state.__class__(
+            **{
+                **base_state.__dict__,
+                "velocity": base_state.velocity.with_values(u_init, v_init),
+                "solid_mask": hard_mask,
+                "nu_tilde": nu_tilde_init,
+            }
         )
 
-        state = sim.create_initial_state()
-        state = sim.set_velocity_field(state, "wind tunnel")
-
-        def step_fn(i, s):
-            return sim.step(s)
-
-        state = jax.lax.fori_loop(0, config.num_sim_steps, step_fn, state)
-
-        pressure = state.pressure.values
-        cell_volume = config.cell_size**2
-
-        grad_mask_x = jnp.zeros_like(obstacle_mask)
-        grad_mask_y = jnp.zeros_like(obstacle_mask)
-        grad_mask_x = grad_mask_x.at[:, 1:-1].set(
-            (obstacle_mask[:, 2:] - obstacle_mask[:, :-2]) / (2 * config.cell_size)
+        # ── 4. RANS time integration ────────────────────────────────────────
+        final_state = jax.lax.fori_loop(
+            0, config.num_sim_steps, lambda i, s: rans_step(s, wd), state
         )
-        grad_mask_y = grad_mask_y.at[1:-1, :].set(
-            (obstacle_mask[2:, :] - obstacle_mask[:-2, :]) / (2 * config.cell_size)
+        final_state = jax.lax.stop_gradient(final_state)
+
+        # ── 5. Aerodynamic forces (differentiable via soft mask) ──────────────
+        nu_eff = jax.lax.stop_gradient(
+            rans_grid.compute_effective_viscosity(final_state)
         )
+        F_drag, F_lift = _compute_forces(final_state, soft_mask_open, nu_eff)
 
-        drag_force = jnp.sum(pressure * grad_mask_x) * cell_volume
-        lift_force = jnp.sum(pressure * grad_mask_y) * cell_volume
+        C_L = F_lift / (q_inf * config.chord_length)
+        C_D = F_drag / (q_inf * config.chord_length)
 
-        q = 0.5 * config.inflow_velocity**2
-        C_D = drag_force / (q * config.chord_length)
-        C_L = lift_force / (q * config.chord_length)
+        # ── 6. Composite loss (strictly matching optimize_naca_suite.py) ──────
+        safe_cl = jnp.maximum(C_L, jnp.float32(0.1))
+        aero_loss = (
+            config.w_drag * (jnp.abs(C_D) / safe_cl)
+            + config.w_lift * jnp.maximum(0.1 - C_L, jnp.float32(0.0)) * 10.0
+        )
+        total_loss = aero_loss + config.w_ratio * geo_loss
 
-        # Loss: minimize |drag| + geometric constraints (same as optimize_airfoil.py)
-        total_loss = jnp.abs(drag_force) + geo_loss
+        return total_loss, (C_L, C_D, F_lift, F_drag, geo_loss)
 
-        return total_loss, (C_L, C_D, lift_force, drag_force, geo_loss)
-
-    def loss_only(params):
-        loss, _ = compute_loss_with_aux(params)
+    def loss_only(params, hard_mask, wd):
+        loss, _ = compute_loss_with_aux(params, hard_mask, wd)
         return loss
 
+    # jax.grad differentiates w.r.t. first arg (params) only
     grad_fn = jax.grad(loss_only)
 
-    return n_weights, compute_loss_with_aux, grad_fn
+    # Precompute subcell soft-mask geometry (for external hard_mask computation)
+    def compute_current_geometry(params_np):
+        """Return (hard_mask, wall_dist) for current params — runs OUTSIDE JAX trace."""
+        wu = jnp.array(params_np[:n_weights])
+        wl = jnp.array(params_np[n_weights:])
+        soft = _create_mask(wu, wl)
+        soft_open = soft.at[1:-1, -1].set(0.0)
+        hard = jnp.where(soft_open >= 0.5, jnp.float32(1.0), jnp.float32(0.0))
+        wd = _wall_dist_from_mask(hard)
+        return hard, wd
+
+    return n_weights, compute_loss_with_aux, grad_fn, compute_current_geometry
 
 
-def _run_iteration(params, compute_loss_with_aux, grad_fn, config):
-    """Run one optimization iteration (CPU-heavy, called in thread)."""
+def _run_iteration(params, hard_mask, wd, compute_loss_with_aux, grad_fn, config):
+    """Run one optimization iteration (CPU-heavy, called in thread).
 
+    Matches optimize_naca_suite.py: hard_mask and wd are computed by the
+    caller BEFORE this function, so scipy EDT never runs inside JAX's trace.
+    """
     loss_val, (C_L, C_D, lift_force, drag_force, geo_loss) = compute_loss_with_aux(
-        params
+        params, hard_mask, wd
     )
-    gradients = grad_fn(params)
-
-    # No gradient clipping (matches optimize_airfoil.py)
+    gradients = grad_fn(params, hard_mask, wd)
 
     has_nan = bool(jnp.isnan(loss_val) or jnp.any(jnp.isnan(gradients)))
 
@@ -402,7 +588,9 @@ async def stream_optimization(ws: WebSocket, session_id: str):
         return
 
     # Build functions (fast — no actual computation yet)
-    n_weights, compute_loss_with_aux, grad_fn = _build_optimization_fns(config)
+    n_weights, compute_loss_with_aux, grad_fn, compute_current_geometry = (
+        _build_optimization_fns(config)
+    )
 
     # Initial parameters
     params = jnp.concatenate(
@@ -421,6 +609,10 @@ async def stream_optimization(ws: WebSocket, session_id: str):
         f"[optimize] Session {config.session_id}: starting {config.num_iterations} iterations"
     )
 
+    # Best-shape tracking (mirrors optimize_naca_suite.py)
+    best_cl_cd = -1.0
+    best_params = params
+
     last_cl = None
     last_cd = None
     last_lift = None
@@ -430,10 +622,20 @@ async def stream_optimization(ws: WebSocket, session_id: str):
 
     try:
         for iteration in range(config.num_iterations):
-            # --- Offload heavy JAX compute to thread pool ---
+            # 1. Compute geometry (hard mask + wall dist) OUTSIDE loss/grad
+            #    Mirrors suite lines 428-431: scipy EDT must not be inside JAX trace.
+            hard_mask, wd = await asyncio.to_thread(compute_current_geometry, params)
+
+            # 2. Offload heavy JAX compute to thread pool
             loss_val, C_L, C_D, lift_force, drag_force, geo_loss, gradients, has_nan = (
                 await asyncio.to_thread(
-                    _run_iteration, params, compute_loss_with_aux, grad_fn, config
+                    _run_iteration,
+                    params,
+                    hard_mask,
+                    wd,
+                    compute_loss_with_aux,
+                    grad_fn,
+                    config,
                 )
             )
 
@@ -453,15 +655,79 @@ async def stream_optimization(ws: WebSocket, session_id: str):
             x_cst, y_upper_cst, y_lower_cst = generate_cst_coords(
                 cur_upper, cur_lower, num_points=config.num_cst_points
             )
-            
-            last_cl = float(C_L)
-            last_cd = float(C_D)
+
+            # 3. Validation & Tracking (mirrors optimize_naca_suite.py)
+            # Resolve re_val from config, falling back to simulation-derived Re
+            re_val = config.reynolds_number or (
+                (config.inflow_velocity * config.chord_length) / config.diffusion
+            )
+            aoa_val = config.angle_of_attack
+
+            # Use the Airfoils/ directory for temporary files
+            project_root = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..", "..", "..")
+            )
+            _AIRFOILS_DIR = os.path.join(project_root, "Airfoils")
+            os.makedirs(_AIRFOILS_DIR, exist_ok=True)
+
+            dat_path = os.path.join(
+                _AIRFOILS_DIR, f"tmp_opt_{config.session_id}_{iteration}.dat"
+            )
+            polar_path = dat_path.replace(".dat", ".txt")
+
+            try:
+                # Use thread to not block event loop when writing/running subprocess
+                await asyncio.to_thread(
+                    write_dat_file, cur_upper, cur_lower, dat_path, num_points=200
+                )
+                xf = await asyncio.to_thread(run_xfoil, dat_path, re_val, aoa_val)
+            finally:
+                # Clean up the dat and txt files immediately
+                for path in [dat_path, polar_path]:
+                    if os.path.exists(path):
+                        try:
+                            os.remove(path)
+                        except Exception:
+                            pass
+
+            # Fallback to JAX RANS values if XFoil fails
+            if xf:
+                cl_x, cd_x = xf
+                eff = cl_x / max(cd_x, 1e-5)
+                if eff > best_cl_cd:
+                    best_cl_cd = eff
+                    best_params = params
+                    last_cl = float(cl_x)
+                    last_cd = float(cd_x)
+
+                display_cl = float(cl_x)
+                display_cd = float(cd_x)
+                cl_cd = eff
+                print(
+                    f"    Iter {iteration+1:2d}: Loss={float(loss_val):.4f}, Cl_xf={cl_x:.4f}, Cd_xf={cd_x:.5f}, Eff_xf={eff:.2f}"
+                )
+            else:
+                # XFoil failed, use JAX RANS as fallback
+                display_cl = float(C_L)
+                display_cd = float(C_D)
+                cl_cd = display_cl / display_cd if abs(display_cd) > 1e-12 else 0.0
+                if cl_cd > best_cl_cd:
+                    best_cl_cd = cl_cd
+                    best_params = params
+                    last_cl = display_cl
+                    last_cd = display_cd
+
+                print(
+                    f"    Iter {iteration+1:2d}: Loss={float(loss_val):.4f}, Xfoil failed (using JAX RANS: Cl={display_cl:.4f}, Cd={display_cd:.5f})"
+                )
+                logger.warning(
+                    f"Session {config.session_id} Iter {iteration+1}: XFoil failed to converge for Re={re_val}, AoA={aoa_val}. Falling back to JAX RANS."
+                )
+
             last_lift = float(lift_force)
             last_drag = float(drag_force)
             last_upper = cur_upper.tolist()
             last_lower = cur_lower.tolist()
-
-            cl_cd = float(C_L) / float(C_D) if abs(float(C_D)) > 1e-12 else 0.0
 
             payload = {
                 "type": "iteration",
@@ -469,8 +735,8 @@ async def stream_optimization(ws: WebSocket, session_id: str):
                     "iteration": iteration + 1,
                     "total_iterations": config.num_iterations,
                     "loss": float(loss_val),
-                    "cl": last_cl,
-                    "cd": last_cd,
+                    "cl": display_cl,
+                    "cd": display_cd,
                     "cl_cd": cl_cd,
                     "lift_force": last_lift,
                     "drag_force": last_drag,
@@ -486,12 +752,6 @@ async def stream_optimization(ws: WebSocket, session_id: str):
 
             await ws.send_json(payload)
 
-            print(
-                f"[optimize] Iter {iteration+1:3d}/{config.num_iterations} | "
-                f"Loss: {float(loss_val):10.4f} | CL: {float(C_L):.6f} | "
-                f"CD: {float(C_D):.6f} | L/D: {cl_cd:.2f}"
-            )
-
             # --- update params ---
             params, opt_state = update_fn(params, gradients, opt_state)
 
@@ -501,9 +761,9 @@ async def stream_optimization(ws: WebSocket, session_id: str):
             else:
                 await asyncio.sleep(0)
 
-        # ----- send final summary -----
-        final_upper = params[:n_weights]
-        final_lower = params[n_weights:]
+        # ----- send final summary (use best L/D shape, mirrors suite's best_state) -----
+        final_upper = best_params[:n_weights]
+        final_lower = best_params[n_weights:]
         x_final, y_upper_final, y_lower_final = generate_cst_coords(
             final_upper, final_lower, num_points=config.num_cst_points
         )
@@ -512,9 +772,9 @@ async def stream_optimization(ws: WebSocket, session_id: str):
             "type": "complete",
             "meta": {
                 "total_iterations": config.num_iterations,
-                "final_cl": float(C_L),
-                "final_cd": float(C_D),
-                "final_cl_cd": cl_cd,
+                "final_cl": last_cl if last_cl is not None else float(C_L),
+                "final_cd": last_cd if last_cd is not None else float(C_D),
+                "final_cl_cd": best_cl_cd,
                 "final_drag": float(drag_force),
                 "final_loss": float(loss_val),
             },
@@ -531,7 +791,7 @@ async def stream_optimization(ws: WebSocket, session_id: str):
             },
         }
         await ws.send_json(final_payload)
-        
+
         _OPT_RESULTS[session_id] = final_payload
 
         print(f"[optimize] Session {config.session_id}: optimization complete")
@@ -540,8 +800,15 @@ async def stream_optimization(ws: WebSocket, session_id: str):
     except WebSocketDisconnect:
         print(f"[optimize] Session {config.session_id}: client disconnected")
     finally:
-        if last_cl is not None and last_cd is not None and last_upper is not None and last_lower is not None:
-            print(f"Saving final optimized airfoil for session {config.session_id}: cl={last_cl:.4f}, cd={last_cd:.4f}")
+        if (
+            last_cl is not None
+            and last_cd is not None
+            and last_upper is not None
+            and last_lower is not None
+        ):
+            print(
+                f"Saving final optimized airfoil for session {config.session_id}: cl={last_cl:.4f}, cd={last_cd:.4f}"
+            )
             try:
                 repo = get_storage_repository()
                 repo.save_optimized_airfoil(
@@ -559,7 +826,10 @@ async def stream_optimization(ws: WebSocket, session_id: str):
                     )
                 )
             except Exception as e:
-                print(f"Failed to auto-save optimization metrics for session {session_id}: {e}")
+                print(
+                    f"Failed to auto-save optimization metrics for session {session_id}: {e}"
+                )
+
 
 @router.get("/sessions/{session_id}/result")
 def get_optimization_result(session_id: str, user: dict = Depends(get_current_user)):
@@ -571,7 +841,9 @@ def get_optimization_result(session_id: str, user: dict = Depends(get_current_us
         # or checking the config:
         config = _OPT_SESSIONS.get(session_id)
         if config and config.user_id != user_id:
-            raise HTTPException(status_code=403, detail="Not authorized to access this session")
+            raise HTTPException(
+                status_code=403, detail="Not authorized to access this session"
+            )
         return _OPT_RESULTS[session_id]
 
     repo = get_storage_repository()
@@ -582,14 +854,20 @@ def get_optimization_result(session_id: str, user: dict = Depends(get_current_us
         raise HTTPException(status_code=404, detail="Session not found")
 
     if session_record.session_type != "optimize":
-        raise HTTPException(status_code=400, detail="This session is not an optimization session")
+        raise HTTPException(
+            status_code=400, detail="This session is not an optimization session"
+        )
 
     airfoil = repo.get_latest_airfoil(session_id, is_optimized=True)
     if not airfoil:
-        raise HTTPException(status_code=404, detail="Optimization result not found for this session")
+        raise HTTPException(
+            status_code=404, detail="Optimization result not found for this session"
+        )
 
     if str(airfoil.created_by_user_id) != str(user_id):
-        raise HTTPException(status_code=403, detail="Not authorized to access this session")
+        raise HTTPException(
+            status_code=403, detail="Not authorized to access this session"
+        )
 
     cst = repo.get_cst(airfoil.cst_id)
     if not cst:
@@ -597,7 +875,7 @@ def get_optimization_result(session_id: str, user: dict = Depends(get_current_us
 
     final_upper = jnp.array(cst.weights_upper)
     final_lower = jnp.array(cst.weights_lower)
-    
+
     num_cst_points = 100
     config = _OPT_SESSIONS.get(session_id)
     if config:
@@ -638,8 +916,6 @@ def get_optimization_result(session_id: str, user: dict = Depends(get_current_us
             "cst_lower": initial_lower,
         },
     }
-    
+
     _OPT_RESULTS[session_id] = final_payload
     return final_payload
-
-
