@@ -15,6 +15,11 @@ def run_xfoil_test():
   
     print("XFOIL STDOUT:", output.stdout)
     print("XFOIL STDERR:", output.stderr)
+
+
+    # check the version of jax installed
+    jax_version = subprocess.run(["pip", "show", "jax"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    print("JAX STDOUT:", jax_version.stdout)
     # xfoil_path = shutil.which("xfoil")
 
     # if xfoil_path is None:
