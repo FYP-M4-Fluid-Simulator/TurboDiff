@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM python:3.11-slim
 
 #name the container
 LABEL name="turbodiff"
@@ -15,7 +15,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     xfoil \
     && rm -rf /var/lib/apt/lists/*
-    
+
 COPY requirements.txt ./
 
 # . requirements.txt only for docker image fast compile
