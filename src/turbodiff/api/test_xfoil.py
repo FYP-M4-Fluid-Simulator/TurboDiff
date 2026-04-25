@@ -15,7 +15,8 @@ def get_airfoil_data(naca="0012", alfa=5.0, reynolds=1000000):
     if not xfoil_path:
         raise RuntimeError("XFOIL binary not found in system PATH.")
 
-    # 1. Format the XFOIL commands
+    # 1. Hardened XFOIL commands
+    # We add an inviscid initialization first to give the viscous solver a stable starting guess.
     commands = f"""
     PLOP
     G F
@@ -23,14 +24,14 @@ def get_airfoil_data(naca="0012", alfa=5.0, reynolds=1000000):
     NACA {naca}
     PANE
     OPER
+    ALFA {alfa}       
     VISC {reynolds}
-    ITER 100
+    ITER 200
     ALFA {alfa}
 
     QUIT
     """
 
-    # 2. Execute in a temporary directory to avoid file clutter
     with tempfile.TemporaryDirectory() as tmp:
         try:
             result = subprocess.run(
@@ -42,18 +43,22 @@ def get_airfoil_data(naca="0012", alfa=5.0, reynolds=1000000):
                 timeout=10,
             )
         except subprocess.TimeoutExpired:
-            raise RuntimeError("XFOIL timed out. The solution likely did not converge.")
+            return {"success": False, "error": "XFOIL timed out (solution did not converge)."}
 
-    # 3. Handle hard crashes
-    if result.returncode != 0:
-        raise RuntimeError(f"XFOIL crashed with return code {result.returncode}")
+    # 2. Gracefully handle the Floating-Point Exception (-8)
+    if result.returncode == -8:
+        logger.warning(f"XFOIL math crashed (SIGFPE) for NACA {naca} at ALFA {alfa}")
+        return {
+            "success": False, 
+            "error": "Aerodynamic math crashed. The angle of attack is likely too high (stall), causing the flow equations to fail."
+        }
+    elif result.returncode != 0:
+        return {"success": False, "error": f"XFOIL failed with return code {result.returncode}"}
 
-    # 4. Use Regex to scrape the final CL and CD values from the stdout text
-    # It looks for "CL = [number]" and extracts just the number.
+    # 3. Extract CL and CD
     cl_match = re.search(r"CL\s*=\s*([-\d.]+)", result.stdout, re.IGNORECASE)
     cd_match = re.search(r"CD\s*=\s*([-\d.]+)", result.stdout, re.IGNORECASE)
 
-    # 5. Validate and return
     if cl_match and cd_match:
         return {
             "success": True,
@@ -64,10 +69,7 @@ def get_airfoil_data(naca="0012", alfa=5.0, reynolds=1000000):
             "cd": float(cd_match.group(1))
         }
     else:
-        # If regex fails, it means XFOIL ran but the aerodynamics didn't converge
-        logger.error("XFOIL Output Snippet: %s", result.stdout[-400:])
-        raise RuntimeError("Aerodynamics did not converge. Could not calculate CL and CD.")
-
+        return {"success": False, "error": "Solution did not converge. Could not calculate CL and CD."}
 
 @router.get("/analyze")
 def analyze_airfoil(naca: str = "0012", alfa: float = 5.0):
