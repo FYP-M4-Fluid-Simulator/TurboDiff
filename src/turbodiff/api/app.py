@@ -11,7 +11,7 @@ from turbodiff.api import (
     optimization_server,
     powerCalculation_routes,
     # testing xfoil api
-    test_xfoil
+    test_xfoil,
 )
 
 from turbodiff.db.storage import configure_storage_from_env
