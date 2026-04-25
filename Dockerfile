@@ -31,7 +31,7 @@ COPY src ./src
 # ENV PYTHONPATH=/app/src
 
 # 2. Install the production dependencies defined in [project]
-RUN pip install --no-cache-dir --no-build-isolation .
+RUN pip install --no-cache-dir .
 
 # 3. Expose the port FastAPI/Uvicorn will run on
 EXPOSE 8000
