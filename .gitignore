@@ -202,6 +202,10 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+# Miniconda files
+Miniconda3-latest-Linux-x86_64.sh
+*.sh
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

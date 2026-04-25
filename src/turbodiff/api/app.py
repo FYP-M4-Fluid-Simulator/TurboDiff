@@ -2,15 +2,18 @@ from __future__ import annotations
 
 from typing import Dict, Tuple
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from turbodiff.api import (
     streaming_server,
     cst_routes,
     optimization_server,
+    powerCalculation_routes,
+    # testing xfoil api
+    test_xfoil
 )
-from turbodiff.api.auth import get_current_user
+
 from turbodiff.db.storage import configure_storage_from_env
 
 FIDELITY_MAP: Dict[str, Tuple[int, int]] = {
@@ -21,7 +24,6 @@ FIDELITY_MAP: Dict[str, Tuple[int, int]] = {
 
 app = FastAPI(
     title="TurboDiff Streaming API",
-    dependencies=[Depends(get_current_user)]
 )
 
 
@@ -41,3 +43,5 @@ app.add_middleware(
 app.include_router(cst_routes.router)
 app.include_router(streaming_server.router)
 app.include_router(optimization_server.router)
+app.include_router(powerCalculation_routes.router)
+app.include_router(test_xfoil.router)

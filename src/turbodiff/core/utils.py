@@ -320,9 +320,53 @@ def apply_zero_velocity_at_solids(
     return u, v
 
 
+@jax.jit
+def apply_ibm_continuous_forcing(
+    u: Array, v: Array, solid_mask: Array
+) -> tuple[Array, Array]:
+    """
+    Apply Continuous Forcing (Immersed Boundary Method) to the velocity field.
+
+    Instead of rigidly assigning 0.0 to any adjacent solid cell, this applies a
+    fractional penalty proportional to the exact solid area coverage of the face.
+    This provides sub-grid accuracy for complex boundaries.
+
+    Args:
+        u: x-velocity, shape (height, width+1)
+        v: y-velocity, shape (height+1, width)
+        solid_mask: Fractional solid volume mask, shape (height, width)
+                    Values should be in [0, 1].
+
+    Returns:
+        (u_new, v_new): Velocity field with continuous momentum penalty applied
+    """
+    height, width = solid_mask.shape
+
+    # 1. Compute solid fractions at u-faces (vertical faces) -> average left & right cells
+    chi_u = jnp.zeros((height, width + 1))
+    chi_u = chi_u.at[:, 1:width].set(0.5 * (solid_mask[:, :-1] + solid_mask[:, 1:]))
+    chi_u = chi_u.at[:, 0].set(solid_mask[:, 0])
+    chi_u = chi_u.at[:, width].set(solid_mask[:, -1])
+
+    # 2. Compute solid fractions at v-faces (horizontal faces) -> average top & bottom cells
+    chi_v = jnp.zeros((height + 1, width))
+    chi_v = chi_v.at[1:height, :].set(0.5 * (solid_mask[:-1, :] + solid_mask[1:, :]))
+    chi_v = chi_v.at[0, :].set(solid_mask[0, :])
+    chi_v = chi_v.at[height, :].set(solid_mask[-1, :])
+
+    # 3. Apply volume penalization (Direct Forcing limit)
+    # Velocity is smoothly scaled by the fluid fraction (1.0 - chi)
+    # This precisely bounds u=0 at inside solids, and partial flow at boundary faces.
+    u_new = u * (1.0 - chi_u)
+    v_new = v * (1.0 - chi_v)
+
+    return u_new, v_new
+
+
 __all__ = [
     "bilinear_interpolate",
     "sample_staggered_velocity_at",
     "create_solid_mask",
     "apply_zero_velocity_at_solids",
+    "apply_ibm_continuous_forcing",
 ]
