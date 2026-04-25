@@ -16,22 +16,13 @@ RUN apt-get update && apt-get install -y \
     xfoil \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt ./
-
-# . requirements.txt only for docker image fast compile
-# Docker will now cache this step permanently unless requirements.txt changes!
-RUN pip install --no-cache-dir -r requirements.txt
-
-
 # 1. Copy only the files needed for installation first
-# COPY pyproject.toml ./
+COPY pyproject.toml ./
 
 COPY src ./src
 
-ENV PYTHONPATH=/app/src
-
 # 2. Install the production dependencies defined in [project]
-# RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir .
 
 # 3. Expose the port FastAPI/Uvicorn will run on
 EXPOSE 8000
