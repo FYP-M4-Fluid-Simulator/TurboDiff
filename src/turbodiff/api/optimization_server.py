@@ -705,13 +705,38 @@ async def stream_optimization(ws: WebSocket, session_id: str):
                 await asyncio.to_thread(
                     write_dat_file, cur_upper, cur_lower, dat_path, num_points=200
                 )
+                logger.info(
+                    "Running XFoil for session %s, iteration %d, Re=%f, AoA=%f",
+                    config.session_id,
+                    iteration + 1,
+                    re_val,
+                    aoa_val,
+                )
                 xf = await asyncio.to_thread(run_xfoil, dat_path, re_val, aoa_val)
+                if xf:
+                    logger.info(
+                        "XFoil for session %s, iteration %d completed: Cl=%f, Cd=%f, Eff=%f",
+                        config.session_id,
+                        iteration + 1,
+                        xf[0],
+                        xf[1],
+                        xf[0] / max(xf[1], 1e-5),
+                    )
+                else:
+                    logger.warning(
+                        "XFoil did not converge for session %s, iteration %d (Re=%f, AoA=%f)",
+                        config.session_id,
+                        iteration + 1,
+                        re_val,
+                        aoa_val,
+                    )
             finally:
                 # Clean up the dat and txt files immediately
                 for path in [dat_path, polar_path]:
                     if os.path.exists(path):
                         try:
                             os.remove(path)
+                            # print("NHI KRRHA DELETE!!")
                         except Exception:
                             pass
 
@@ -732,6 +757,9 @@ async def stream_optimization(ws: WebSocket, session_id: str):
                 cl_cd = eff
                 print(
                     f"    Iter {iteration+1:2d}: Loss={float(loss_val):.4f}, Cl_xf={cl_x:.4f}, Cd_xf={cd_x:.5f}, Eff_xf={eff:.2f}"
+                )
+                logger.info(
+                    f"Session {config.session_id} Iter {iteration+1}: XFoil converged Cl={cl_x:.4f}, Cd={cd_x:.5f}, Eff={eff:.2f}"
                 )
             else:
                 # XFoil failed, use JAX RANS as fallback
