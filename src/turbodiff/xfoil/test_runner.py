@@ -21,7 +21,7 @@ def test_naca_0012_alignment():
     write_dat_file(NACA0012_W_U, NACA0012_W_L, dat_file, label="NACA 0012 CST")
 
     # 2. Use the exact parameters from the successful BASELINE run
-    re = 100000.0  # 1e5
+    re = 1000000.0  # 1e6
     aoa = 0.0
 
     print("--- Running XFoil Alignment Test ---")

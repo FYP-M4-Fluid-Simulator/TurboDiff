@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _FALLBACK_PATHS = [
+    "/usr/bin/xfoil",  # Standard Linux (Apt)
     "/usr/local/bin/xfoil",
     "/opt/homebrew/bin/xfoil",
     "/Users/musab/Xfoil-for-Mac/bin/xfoil",
@@ -107,6 +108,7 @@ PACC
 {polar_name}
 
 ALFA {aoa}
+
 QUIT
 """
 
