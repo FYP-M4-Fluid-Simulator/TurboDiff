@@ -125,11 +125,13 @@ QUIT
             if "EOF" not in err_msg:
                 logger.warning(
                     "XFoil exited with code %s. stderr: %s\nstdout:\n%s",
-                    process.returncode, err_msg[:200], stdout[:500],
+                    process.returncode, err_msg[:200], stdout[:800],
                 )
 
     except subprocess.TimeoutExpired:
         logger.error(f"XFoil timed out after {timeout}s for {dat_file}")
+        process.kill()
+        process.wait()
         return None
     except FileNotFoundError:
         logger.error("'xfoil' command not found. Ensure it is installed and in PATH.")
