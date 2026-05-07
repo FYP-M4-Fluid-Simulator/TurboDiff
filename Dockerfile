@@ -14,6 +14,8 @@ WORKDIR /app
 # The 'rm -rf /var/lib/apt/lists/*' step is a Docker best practice to keep the image size slim.
 RUN apt-get update && apt-get install -y \
     xfoil \
+    libgfortran5 \
+    libx11-6 \
     && rm -rf /var/lib/apt/lists/*
 
 # 1. Copy only the files needed for installation first

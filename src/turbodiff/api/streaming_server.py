@@ -428,13 +428,53 @@ async def stream_state(ws: WebSocket, session_id: str):
     print(f"   Re={config.reynolds_number}, nu={viscosity:.2e}")
     print(f"   sim_time={config.sim_time}s, dt={config.dt}s, max_steps={max_steps}")
 
+    # Number of simulation steps to run in a single executor call.
+    # Larger chunks = less asyncio overhead; smaller = more responsive WebSocket.
+    # 20 steps is a good balance: keeps each executor call under ~1 second
+    # and lets the event loop service keepalive pings between chunks.
+    _CHUNK_SIZE = 20
+
+    def _run_chunk(current_state: "FluidState", n_steps: int) -> "FluidState":
+        """Run n_steps of the RANS simulation synchronously in a threadpool worker.
+        Defined outside the loop to avoid re-creating the closure on every iteration.
+        """
+        s = current_state
+        for _ in range(n_steps):
+            # 1. SA turbulence step
+            s = grid.step_sa_turbulence(s, grid._wall_dist, num_diff_iters=4)
+            nu_eff = grid.compute_effective_viscosity(s)
+
+            # 2. Velocity step
+            s = grid.diffuse_velocity(s, num_iters=20, nu_eff_field=nu_eff)
+            s = grid.advect_velocity(s)
+
+            # 3. Density step
+            s = grid.add_sources_to_density(s)
+            s = grid.advect_density(s)
+
+            # 4. Boundary enforcement and pressure
+            s = grid.inject_wind_tunnel_velocity(s)
+            s = grid.solve_pressure(s, num_iters=60)
+            s = grid.project_velocity(s)
+            s = grid.inject_wind_tunnel_velocity(s)
+
+            s = s.__class__(
+                density=s.density,
+                velocity=s.velocity,
+                pressure=s.pressure,
+                solid_mask=s.solid_mask,
+                sources=s.sources,
+                nu_tilde=s.nu_tilde,
+                time=s.time + grid.dt,
+                step=s.step + 1,
+            )
+        return s
+
+    loop = asyncio.get_running_loop()
+
     try:
         while True:
-            # Log every 100 steps
-            if step % 100 == 0:
-                print(f"   Progress: step={step}/{max_steps}")
-
-            # Check if we should stop
+            # Check if we should stop before running the next chunk
             if max_steps > 0 and step >= max_steps:
                 print(
                     f"   Simulation complete: reached {step} steps (max: {max_steps})"
@@ -442,36 +482,22 @@ async def stream_state(ws: WebSocket, session_id: str):
                 print("   Breaking out of loop...")
                 break
 
-            # Manual RANS step to control iterations
-            # 1. SA turbulence step
-            state = grid.step_sa_turbulence(state, grid._wall_dist, num_diff_iters=4)
-            nu_eff = grid.compute_effective_viscosity(state)
+            # Determine how many steps to run in this chunk
+            if max_steps > 0:
+                chunk = min(_CHUNK_SIZE, max_steps - step)
+            else:
+                chunk = _CHUNK_SIZE
 
-            # 2. Velocity step
-            state = grid.diffuse_velocity(state, num_iters=20, nu_eff_field=nu_eff)
-            state = grid.advect_velocity(state)
+            # ── Offload the heavy JAX computation to a threadpool. ──────────────
+            # This yields control back to the asyncio event loop between chunks,
+            # allowing WebSocket keepalive pings to be serviced and preventing
+            # the "keepalive ping failed / AssertionError" crash.
+            state = await loop.run_in_executor(None, _run_chunk, state, chunk)
+            step += chunk
 
-            # 3. Density step
-            state = grid.add_sources_to_density(state)
-            state = grid.advect_density(state)
-
-            # 4. Boundary enforcement and pressure
-            state = grid.inject_wind_tunnel_velocity(state)
-            state = grid.solve_pressure(state, num_iters=60)  # Increased for RANS
-            state = grid.project_velocity(state)
-            state = grid.inject_wind_tunnel_velocity(state)  # Re-inject
-
-            state = state.__class__(
-                density=state.density,
-                velocity=state.velocity,
-                pressure=state.pressure,
-                solid_mask=state.solid_mask,
-                sources=state.sources,
-                nu_tilde=state.nu_tilde,
-                time=state.time + grid.dt,
-                step=state.step + 1,
-            )
-            step += 1
+            # Log progress every 100 steps
+            if (step // chunk) % (100 // _CHUNK_SIZE or 1) == 0:
+                print(f"   Progress: step={step}/{max_steps}")
 
             if step % config.stream_every == 0:
                 # Calculate aerodynamic coefficients using the benchmark method
@@ -544,15 +570,20 @@ async def stream_state(ws: WebSocket, session_id: str):
         # These are cleaned up in the finally block below.
         # Persist the DAT file in the project's Airfoils/ directory for inspection.
         # The project root is three levels up from this file (api/turbodiff/src).
-        project_root = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..", "..")
-        )
-        _AIRFOILS_DIR = os.path.join(project_root, "Airfoils")
-        os.makedirs(_AIRFOILS_DIR, exist_ok=True)
-        dat_path = os.path.join(_AIRFOILS_DIR, f"{session_id}.dat")
+        # project_root = os.path.abspath(
+        #     os.path.join(os.path.dirname(__file__), "..", "..", "..")
+        # )
+        # _AIRFOILS_DIR = os.path.join(project_root, "Airfoils")
+        # os.makedirs(_AIRFOILS_DIR, exist_ok=True)
+        # dat_path = os.path.join(_AIRFOILS_DIR, f"{session_id}.dat")
 
+        work_dir = "/tmp/airfoils"
+        os.makedirs(work_dir, exist_ok=True)
+
+        dat_path = os.path.join(work_dir, f"{session_id}.dat")
+    
         print(f"   Running XFoil validation: Re={re:.2e}, AoA={aoa_deg}°")
-        print(f"   DAT file → {dat_path}")
+        print(f"   DAT file → {work_dir}")
         try:
             loop = asyncio.get_event_loop()
 
