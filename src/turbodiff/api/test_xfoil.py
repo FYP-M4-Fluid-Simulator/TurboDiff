@@ -77,12 +77,13 @@ quit
 
         # 3. Parse the output text using Regular Expressions
         # We are looking for the exact lines where XFOIL prints CL = ... and CD = ...
-        cl_match = re.search(r"CL\s*=\s*([+-]?\d*\.\d+)", stdout)
-        cd_match = re.search(r"CD\s*=\s*([+-]?\d*\.\d+)", stdout)
 
-        if cl_match and cd_match:
-            cl = float(cl_match.group(1))
-            cd = float(cd_match.group(1))
+        cl_matches = re.findall(r"CL\s*=\s*([+-]?\d*\.\d+)", stdout)
+        cd_matches = re.findall(r"CD\s*=\s*([+-]?\d*\.\d+)", stdout)
+
+        if cl_matches and cd_matches:
+            cl = float(cl_matches[-1])
+            cd = float(cd_matches[-1])
             logger.info("XFOIL converged: Cl=%s Cd=%s", cl, cd)
             print(f"[XFoilAPI] XFOIL converged with Cl={cl}, Cd={cd}", flush=True)
             return cl, cd
