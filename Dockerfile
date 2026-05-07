@@ -18,13 +18,14 @@ RUN apt-get update && apt-get install -y \
     libx11-6 \
     && rm -rf /var/lib/apt/lists/*
 
-# 1. Copy and install dependencies FIRST 
+# 1. Copy and install dependencies 
 COPY pyproject.toml ./
+
+# 2. Copy source code 
+COPY src ./src
 
 RUN pip install --no-cache-dir .
 
-# 2. Copy source code AFTER deps are installed (this layer rebuilds on code changes, but is instant)
-COPY src ./src
 
 
 # 3. Expose the port FastAPI/Uvicorn will run on
