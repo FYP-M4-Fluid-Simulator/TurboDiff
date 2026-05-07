@@ -570,20 +570,20 @@ async def stream_state(ws: WebSocket, session_id: str):
         # These are cleaned up in the finally block below.
         # Persist the DAT file in the project's Airfoils/ directory for inspection.
         # The project root is three levels up from this file (api/turbodiff/src).
-        # project_root = os.path.abspath(
-        #     os.path.join(os.path.dirname(__file__), "..", "..", "..")
-        # )
-        # _AIRFOILS_DIR = os.path.join(project_root, "Airfoils")
-        # os.makedirs(_AIRFOILS_DIR, exist_ok=True)
-        # dat_path = os.path.join(_AIRFOILS_DIR, f"{session_id}.dat")
+        project_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "..")
+        )
+        _AIRFOILS_DIR = os.path.join(project_root, "Airfoils")
+        os.makedirs(_AIRFOILS_DIR, exist_ok=True)
+        dat_path = os.path.join(_AIRFOILS_DIR, f"{session_id}.dat")
 
-        work_dir = "/tmp/airfoils"
-        os.makedirs(work_dir, exist_ok=True)
+        # work_dir = "/tmp/airfoils"
+        # os.makedirs(work_dir, exist_ok=True)
 
-        dat_path = os.path.join(work_dir, f"{session_id}.dat")
+        # dat_path = os.path.join(work_dir, f"{session_id}.dat")
     
         print(f"   Running XFoil validation: Re={re:.2e}, AoA={aoa_deg}°")
-        print(f"   DAT file → {work_dir}")
+        print(f"   DAT file → {dat_path}")
         try:
             loop = asyncio.get_event_loop()
 

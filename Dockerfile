@@ -18,17 +18,18 @@ RUN apt-get update && apt-get install -y \
     libx11-6 \
     && rm -rf /var/lib/apt/lists/*
 
-# 1. Copy only the files needed for installation first
+# 1. Copy and install dependencies FIRST 
 COPY pyproject.toml ./
 
+RUN pip install --no-cache-dir .
+
+# 2. Copy source code AFTER deps are installed (this layer rebuilds on code changes, but is instant)
 COPY src ./src
 
-# 2. Install the production dependencies defined in [project]
-RUN pip install --no-cache-dir .
 
 # 3. Expose the port FastAPI/Uvicorn will run on
 EXPOSE 8000
 
 # 4. Run the application
 # Note: Since the package is installed, 'turbodiff' is now in the site-packages
-ENTRYPOINT ["uvicorn", "turbodiff.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+ENTRYPOINT ["uvicorn", "turbodiff.api.app:app", "--host", "0.0.0.0", "--port", "8000", "--ws-ping-interval", "300", "--ws-ping-timeout", "300"]
