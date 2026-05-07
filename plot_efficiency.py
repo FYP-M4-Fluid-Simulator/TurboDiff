@@ -23,22 +23,30 @@ TURBO_DIFF_DIR = "/Users/musab/FYP/TurboDiff"
 RESULTS_DIR = os.path.join(TURBO_DIFF_DIR, "xfoil_polars")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-
 def run_xfoil(airfoil_path, re, alphas, output_file):
+    # 1. Check if valid file already exists
     if os.path.exists(output_file):
-        # Check if file has data (not just header)
         with open(output_file, "r") as f:
             if len(f.readlines()) > 10:
                 return True
 
+    # 2. Setup paths safely
     basename = os.path.basename(airfoil_path)
     output_basename = os.path.basename(output_file)
-    tmp_airfoil = os.path.join(RESULTS_DIR, basename)
+    
+    # Ensure RESULTS_DIR is exactly where output_file is expected
+    target_dir = os.path.dirname(os.path.abspath(output_file)) 
+    tmp_airfoil = os.path.join(target_dir, basename)
+    
+    # Copy airfoil to target directory if needed
     if not os.path.exists(tmp_airfoil) or airfoil_path != tmp_airfoil:
-        import shutil
-
         shutil.copy(airfoil_path, tmp_airfoil)
 
+    # 3. PREVENT OVERWRITE HANG: Delete the target txt file if it's a failed/short file
+    if os.path.exists(output_file):
+        os.remove(output_file)
+
+    # 4. Build commands (The empty line after output_basename skips the dump file)
     commands = f"""LOAD {basename}
 PANE
 OPER
@@ -57,22 +65,28 @@ PACC
         current_env = os.environ.copy()
         current_env["DISPLAY"] = ":0"
         process = subprocess.Popen(
-            XFOIL_PATH,
+            XFOIL_PATH, # Ensure this is an absolute path (e.g., '/usr/bin/xfoil')
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             env=current_env,
-            cwd=RESULTS_DIR,
+            cwd=target_dir, # Run exactly where the file needs to be
         )
         out, err = process.communicate(input=commands)
 
+        # 5. Log actual errors if it fails
+        if process.returncode not in [0, 2]: # Accept 2 as Fortran EOF is harmless
+            print(f"XFoil Error (Code {process.returncode}) for {basename}")
+            print(f"Stderr: {err.strip()}")
+
+        # 6. Verify the file was actually created
         success = os.path.exists(output_file)
         return success
+        
     except Exception as e:
-        print(f"Error running XFoil for {basename}: {e}")
+        print(f"Subprocess Exception for {basename}: {e}")
         return False
-
 
 def parse_polar(polar_file):
     alphas, cls, cds = [], [], []
