@@ -4,7 +4,7 @@ from fastapi import HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.security.utils import get_authorization_scheme_param
 import firebase_admin
-from firebase_admin import credentials, auth
+from firebase_admin import auth
 
 try:
     if not firebase_admin._apps:
@@ -15,9 +15,10 @@ except Exception as e:
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
+
 async def get_current_user(
     connection: HTTPConnection,
-    bearer: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme)
+    bearer: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
 ):
     """
     Universal dependency to get the current user from Firebase JWT token.
@@ -32,7 +33,7 @@ async def get_current_user(
             scheme, auth_cred = get_authorization_scheme_param(authorization)
             if scheme.lower() == "bearer":
                 token = auth_cred
-    
+
     # 2. Check Query Parameters (fallback for WebSockets)
     if not token:
         token = connection.query_params.get("token")

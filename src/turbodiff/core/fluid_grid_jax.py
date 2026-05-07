@@ -1189,6 +1189,7 @@ class FluidGrid:
             pressure=state.pressure,
             solid_mask=state.solid_mask,
             sources=sources,
+            nu_tilde=state.nu_tilde,
             time=state.time,
             step=state.step,
         )
@@ -1827,12 +1828,9 @@ jax.tree_util.register_pytree_node(
 
 
 def _fluid_grid_flatten(grid):
-    """Flatten FluidGrid for JAX transformation.
-
-    Treats the solid_mask as dynamic data that can be differentiated,
-    while storing all other configuration as static metadata.
-    """
-    children = (grid.solid_mask,)
+    """Flatten FluidGrid for JAX transformation."""
+    # solid_mask and _wall_dist are the primary dynamic JAX arrays.
+    children = (grid.solid_mask, grid._wall_dist)
     metadata = {
         "height": grid.height,
         "width": grid.width,
@@ -1840,11 +1838,15 @@ def _fluid_grid_flatten(grid):
         "dt": grid.dt,
         "diffusion": grid.diffusion,
         "viscosity": grid.viscosity,
+        "rho": grid.rho,
+        "use_sa_turbulence": grid.use_sa_turbulence,
         "visualise": grid.visualise,
         "show_cell_property": grid.show_cell_property,
         "show_velocity": grid.show_velocity,
         "show_cell_centered_velocity": grid.show_cell_centered_velocity,
         "is_wind_tunnel": grid.is_wind_tunnel,
+        "inlet_velocity": grid.inlet_velocity,
+        "inlet_angle_rad": grid.inlet_angle_rad,
         "cv_rect": grid.cv_rect,
     }
     return children, metadata
@@ -1852,10 +1854,8 @@ def _fluid_grid_flatten(grid):
 
 def _fluid_grid_unflatten(metadata, children):
     """Reconstruct FluidGrid from flattened representation."""
-    (solid_mask,) = children
+    solid_mask, wall_dist = children
 
-    # Create a new FluidGrid with the stored configuration
-    # We need to create it without SDF since we already have the solid_mask
     grid = FluidGrid(
         height=metadata["height"],
         width=metadata["width"],
@@ -1863,7 +1863,9 @@ def _fluid_grid_unflatten(metadata, children):
         dt=metadata["dt"],
         diffusion=metadata["diffusion"],
         viscosity=metadata["viscosity"],
-        boundary_type=0,  # Use no boundary since we have the mask
+        rho=metadata["rho"],
+        use_sa_turbulence=metadata["use_sa_turbulence"],
+        boundary_type=0,
         sdf=None,
         visualise=metadata["visualise"],
         show_cell_property=metadata["show_cell_property"],
@@ -1872,9 +1874,11 @@ def _fluid_grid_unflatten(metadata, children):
         cv_rect=metadata.get("cv_rect"),
     )
 
-    # Replace the solid_mask with the one from children
     grid.solid_mask = solid_mask
+    grid._wall_dist = wall_dist
     grid.is_wind_tunnel = metadata["is_wind_tunnel"]
+    grid.inlet_velocity = metadata.get("inlet_velocity", 2.0)
+    grid.inlet_angle_rad = metadata.get("inlet_angle_rad", 0.0)
 
     return grid
 
