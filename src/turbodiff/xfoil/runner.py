@@ -143,8 +143,7 @@ QUIT
         return None
 
     if not os.path.exists(polar_file):
-        # Optional: log stdout on failure to help diagnose convergence issues
-        # logger.debug(f"XFoil stdout: {stdout}")
+        logger.warning(f"XFoil did not produce a polar file for {dat_file}. stdout:\n{stdout[:500]}")
         return None
 
     try:
