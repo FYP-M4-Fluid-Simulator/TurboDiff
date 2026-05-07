@@ -47,9 +47,7 @@ def run_xfoil(airfoil_path, re, alphas, output_file):
         os.remove(output_file)
 
     # 4. Build commands (The empty line after output_basename skips the dump file)
-    commands = f"""plop
-g
-LOAD {basename}
+    commands = f"""LOAD {basename}
 PANE
 OPER
 ITER 200

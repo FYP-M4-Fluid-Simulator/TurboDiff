@@ -22,6 +22,7 @@ Set XFOIL_PATH to override for your environment.
 from __future__ import annotations
 
 import os
+import re as re_mod
 import subprocess
 import shutil
 import logging
@@ -79,92 +80,80 @@ def run_xfoil(
     timeout: int = 20,  # Match example script timeout
     max_iter: int = 300,
 ) -> Optional[Tuple[float, float]]:
-    """Run XFoil on a Selig-format .dat file and return (Cl, Cd) or None."""
+    """Run XFoil on a Selig-format .dat file and return (Cl, Cd) or None.
+
+    Uses the same subprocess pattern as test_xfoil.py (which is confirmed
+    working inside the Docker container):
+      - Invoke xfoil as a list arg to Popen
+      - No env / DISPLAY manipulation
+      - Parse CL and CD from stdout using regex (no polar file)
+    """
     binary = xfoil_path or XFOIL_PATH
     if not binary:
         logger.error("XFoil binary not found.")
         return None
 
-    print(f"Running XFoil for {os.path.basename(dat_file)} with Re={re} and AoA={aoa}")
-
-    # Use bare filenames — XFoil on Mac silently fails to open/create files
-    # when given absolute paths in LOAD / PACC commands. Running with cwd set
-    # to the dat directory and passing only the filename reliably produces the polar.
-    work_dir = os.path.dirname(os.path.abspath(dat_file))
     dat_name = os.path.basename(dat_file)
-    polar_name = dat_name.replace(".dat", ".txt")
-    polar_file = os.path.join(work_dir, polar_name)
+    work_dir = os.path.dirname(os.path.abspath(dat_file))
 
-    if os.path.exists(polar_file):
-        os.remove(polar_file)
+    print(f"Running XFoil for {dat_name} with Re={re} and AoA={aoa}")
 
-    # Strictly following the triple-quoted command structure for reliability
+    # Command sequence mirrors the working test_xfoil.py pattern.
+    # LOAD + PANE replaces NACA since we have a custom .dat file.
     commands = f"""LOAD {dat_name}
 PANE
 OPER
 ITER {max_iter}
 VISC {re}
-PACC
-{polar_name}
-
 ALFA {aoa}
-
 QUIT
 """
 
     try:
-        env = os.environ.copy()
-        env["DISPLAY"] = ":0"
         process = subprocess.Popen(
-            binary,
+            [binary],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env=env,
-            cwd=work_dir,  # ← run from the dat file's directory
+            cwd=work_dir,
         )
         stdout, stderr = process.communicate(input=commands, timeout=timeout)
 
-        # XFoil on Mac/gfortran frequently exits with a non-zero code due to a
-        # Fortran EOF error triggered when stdin closes. This is cosmetic.
         if process.returncode != 0:
             err_msg = stderr.strip() if stderr else ""
             if "EOF" not in err_msg:
                 logger.warning(
-                    f"XFoil exited with code {process.returncode}. stderr: {err_msg[:200]}"
+                    "XFoil exited with code %s. stderr: %s\nstdout:\n%s",
+                    process.returncode, err_msg[:200], stdout[:500],
                 )
 
     except subprocess.TimeoutExpired:
         logger.error(f"XFoil timed out after {timeout}s for {dat_file}")
         return None
+    except FileNotFoundError:
+        logger.error("'xfoil' command not found. Ensure it is installed and in PATH.")
+        return None
     except Exception as e:
         logger.error(f"Exception running XFoil: {e}")
         return None
 
-    if not os.path.exists(polar_file):
-        logger.warning(f"XFoil did not produce a polar file for {dat_file}. stdout:\n{stdout[:500]}")
+    # Parse CL and CD from stdout — same regex approach as test_xfoil.py
+    cl_matches = re_mod.findall(r"CL\s*=\s*([+-]?\d*\.?\d+)", stdout)
+    cd_matches = re_mod.findall(r"CD\s*=\s*([+-]?\d*\.?\d+)", stdout)
+
+    if cl_matches and cd_matches:
+        cl = float(cl_matches[-1])
+        cd = float(cd_matches[-1])
+        logger.info("XFoil converged: Cl=%s Cd=%s", cl, cd)
+        print(f"XFoil converged: Cl={cl}, Cd={cd}")
+        return cl, cd
+    else:
+        logger.warning(
+            "XFoil did not converge for Re=%.2e, AoA=%.1f. stdout:\n%s",
+            re, aoa, stdout[:500],
+        )
         return None
-
-    try:
-        with open(polar_file, "r") as fh:
-            for line in fh:
-                parts = line.split()
-                if len(parts) >= 3:
-                    try:
-                        # Ensure first 3 parts are valid floats (AoA, Cl, Cd)
-                        p0, p1, p2 = float(parts[0]), float(parts[1]), float(parts[2])
-                        if abs(p0 - aoa) < 0.01:
-                            return p1, p2
-                    except ValueError:
-                        continue  # Skip header/text lines
-
-        logger.warning(f"XFoil converged but AoA={aoa} not found in {polar_file}")
-    except Exception as e:
-        logger.error(f"Error parsing XFoil polar file: {e}")
-        pass
-
-    return None
 
 
 def write_dat_file(
