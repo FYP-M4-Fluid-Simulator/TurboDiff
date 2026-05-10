@@ -24,7 +24,7 @@ COPY pyproject.toml ./
 # 2. Copy source code 
 COPY src ./src
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir -e .
 
 
 # 3. Expose the port FastAPI/Uvicorn will run on
