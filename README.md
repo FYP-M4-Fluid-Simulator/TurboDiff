@@ -12,6 +12,7 @@ A differentiable fluid simulation pipeline for Wind Turbine Shape Optimization
 
 # How to Setup for Development
 
+## Locally 
 1. Make a virtual environment for project using `python -m venv /path/to/venv`
 2. Install turbodiff in editable mode using `pip install -e '.[dev]'` from project root directory
 3. **(Linux with NVIDIA GPU only)** For GPU acceleration, install CUDA-enabled JAX:
@@ -22,6 +23,16 @@ A differentiable fluid simulation pipeline for Wind Turbine Shape Optimization
 4. **(Windows)** JAX CPU-only is installed by default. GPU support is experimental.
 5. Run `pre-commit install`, this will ensure that your code is reformatted according to the Black formatter on commit
 6. Run `pre-commit run --all-files` to run black, Ruff, and prettier before committing
+
+## Docker
+Ensure you have `firebase-creds.json` in the root directory and `.env` in the project root. Env details as mentioned in [Configure](#configure). 
+
+After `env`s have been setup you can run the docker file using the bash script [build_and_run_docker.sh](./build_and_run_docker.sh)
+
+This script will build the docker image and run the container.
+
+The container will be accessible at [http://localhost:8000](http://localhost:8000).
+
 
 # Testing
 
@@ -37,8 +48,10 @@ TurboDiff now supports saving sessions and airfoils in Postgres (Neon compatible
 1. Create a `.env` file at the repo root with:
    ```
    TURBODIFF_DATABASE_URL=postgresql://USER:PASSWORD@HOST/DB?sslmode=require
+   GOOGLE_APPLICATION_CREDENTIALS=./firebase-creds.json
    ```
 2. Install dependencies (includes `psycopg` and `python-dotenv`).
+
 
 ## Database migrations
 

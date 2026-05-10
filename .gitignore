@@ -204,7 +204,7 @@ cython_debug/
 
 # Miniconda files
 Miniconda3-latest-Linux-x86_64.sh
-*.sh
+# *.sh
 
 # Marimo
 marimo/_static/
