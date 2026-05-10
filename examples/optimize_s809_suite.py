@@ -1,7 +1,7 @@
 """
-Multi-Condition Airfoil Optimization Suite — NACA 0012
+Multi-Condition Airfoil Optimization Suite — S809
 ======================================================
-Optimizes NACA 0012 across a 3x3 matrix of (Reynolds Number x AoA).
+Optimizes S809 across a 3x3 matrix of (Reynolds Number x AoA).
 Each case runs for a fixed number of iterations (default 30).
 Validates against Xfoil after each step and tracks the best airfoil per case.
 
@@ -10,9 +10,9 @@ Conditions:
   - AoA: 0, 4, 8
 
 Outputs:
-  - optimization_summary.txt : results for all 9 cases.
-  - shapes_re_{RE}.png       : 4-way shape comparison per RE.
-  - best_airfoil_re_{RE}_aoa_{AOA}.dat : Selig format coordinates.
+  - s809_optimization_summary.txt : results for all 9 cases.
+  - s809_shapes_re_{RE}.png       : 4-way shape comparison per RE.
+  - best_s809_re_{RE}_aoa_{AOA}.dat : Selig format coordinates.
 """
 
 import os
@@ -43,19 +43,19 @@ from scipy.special import comb as sp_comb
 # ─────────────────────────────────────────────────────────────────────────────
 # GLOBAL PARAMETERS (Configurable)
 # ─────────────────────────────────────────────────────────────────────────────
-NUM_ITERATIONS = 30
+NUM_ITERATIONS = 15
 LEARNING_RATE = 0.005
 N_ORDER = 5
 
 RE_LIST = [1e5, 1e6, 6e6]
-AOA_LIST = [0, 4, 8]
+AOA_LIST = [0, 4]
 
 XFOIL_PATH = "/Users/musab/Xfoil-for-Mac/bin/xfoil"
-RESULTS_DIR = "naca_results"
-OUTPUT_SUMMARY = os.path.join(RESULTS_DIR, "optimization_summary.txt")
+RESULTS_DIR = "s809_results"
+OUTPUT_SUMMARY = os.path.join(RESULTS_DIR, "s809_optimization_summary.txt")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-# Physics/Grid (from optimize_airfoil_rans.py)
+# Physics/Grid
 HEIGHT = 128
 WIDTH = 384
 CELL_SIZE = 0.01
@@ -68,12 +68,12 @@ AIRFOIL_Y0 = HEIGHT * CELL_SIZE / 2.0
 N_SIM_STEPS = 1000
 N_SUB = 3
 
-# NACA 0012 Approximate CST Weights (Order 5)
-NACA0012_W_U = jnp.array([0.1726, 0.1269, 0.1441, 0.1080, 0.1750, 0.1471])
-NACA0012_W_L = -NACA0012_W_U
+# S809 CST Weights (Order 5) - Generated from s809.dat
+S809_W_U = jnp.array([0.1573, 0.2613, 0.3700, 0.1391, 0.3161, 0.1539])
+S809_W_L = jnp.array([-0.1197, -0.2709, -0.3730, -0.2800, -0.0845, 0.0285])
 
-# Geometry constraints (from optimize_airfoil_rans.py)
-MIN_THICKNESS_RATIO = 0.10
+# Geometry constraints
+MIN_THICKNESS_RATIO = 0.15  # S809 is thicker (around 21%)
 MAX_THICKNESS_RATIO = 0.25
 W_DRAG = 1.0
 W_LIFT = 0.5
@@ -195,16 +195,11 @@ def get_or_build_grid(u_inlet, v_inlet, nu_lam):
     return _GRID_CACHE[key]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Xfoil Helper & Parser
-# ─────────────────────────────────────────────────────────────────────────────
 def run_xfoil(dat_file, re, aoa):
     polar_file = dat_file.replace(".dat", ".txt")
-    print(f"Running Xfoil for {dat_file} with Re={re} and AoA={aoa}")
     if os.path.exists(polar_file):
         os.remove(polar_file)
 
-    # Leveraged command structure from xfoil_validation.py
     commands = f"""LOAD {dat_file}
 PANE
 OPER
@@ -248,14 +243,12 @@ QUIT
     return None
 
 
-def write_dat(wu, wl, filepath, label="CST Airfoil", num_points=200):
+def write_dat(wu, wl, filepath, label="S809-like Airfoil", num_points=200):
     wu_j, wl_j = jnp.array(wu), jnp.array(wl)
     x_norm, y_upper, y_lower = generate_cst_coords(wu_j, wl_j, num_points=num_points)
     x_np = np.array(x_norm)
     yu = np.array(y_upper)
     yl = np.array(y_lower)
-    # Selig format: upper surface TE→LE, then lower surface LE→TE
-    # Both include the LE point (x=0); XFoil's PANE handles the duplicate fine.
     x_upper_out = x_np[::-1]
     y_upper_out = yu[::-1]
     x_lower_out = x_np
@@ -268,9 +261,6 @@ def write_dat(wu, wl, filepath, label="CST Airfoil", num_points=200):
             f.write(f"  {xi:.6f}  {yi:.6f}\n")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Optimized Geometry Logic (Soft Mask)
-# ─────────────────────────────────────────────────────────────────────────────
 def build_soft_mask(weights_u, weights_l, subcells):
     sharpness = 500.0
     accum = jnp.zeros((HEIGHT, WIDTH))
@@ -290,8 +280,6 @@ def build_soft_mask(weights_u, weights_l, subcells):
 def precompute_subcells():
     n_order = N_ORDER
     i_vals = np.arange(n_order + 1)
-    # Keep binom as a numpy array so all sub-cell arithmetic stays in NumPy
-    # (avoids the JAX bool-dtype FutureWarning from mixed numpy/JAX broadcasting)
     binom = np.array(
         [sp_comb(n_order, i, exact=True) for i in i_vals], dtype=np.float32
     )
@@ -306,7 +294,7 @@ def precompute_subcells():
             xi_grid = cx_rel / CHORD
             xi_c = np.clip(xi_grid, 0.0, 1.0).astype(np.float32)
             C_g = (np.sqrt(np.maximum(xi_c, 0.0)) * (1.0 - xi_c)).astype(np.float32)
-            xi_c_col = xi_c[..., None]  # (H, W, 1)
+            xi_c_col = xi_c[..., None]
             B_g = (
                 binom * xi_c_col**i_vals * (1.0 - xi_c_col) ** (n_order - i_vals)
             ).astype(np.float32)
@@ -321,11 +309,10 @@ def precompute_subcells():
     return subcells
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MAIN OPTIMIZATION LOOP
-# ─────────────────────────────────────────────────────────────────────────────
 def run_suite():
-    print(f"Starting Multi-Condition Optimization Suite ({NUM_ITERATIONS} iterations)")
+    print(
+        f"Starting Multi-Condition Optimization Suite for S809 ({NUM_ITERATIONS} iterations)"
+    )
     subcells = precompute_subcells()
     if os.path.exists(OUTPUT_SUMMARY):
         os.remove(OUTPUT_SUMMARY)
@@ -339,19 +326,16 @@ def run_suite():
                 math.radians(aoa_val)
             ), U_INF * math.sin(math.radians(aoa_val))
             grid, rans_step = get_or_build_grid(u_inlet, v_inlet, nu_lam)
-            wu, wl = jnp.copy(NACA0012_W_U), jnp.copy(NACA0012_W_L)
+            wu, wl = jnp.copy(S809_W_U), jnp.copy(S809_W_L)
             best_cl_cd, best_cl, best_cd, best_state = -1.0, 0.0, 0.0, (wu, wl)
             best_loss = float("inf")
             aoa_rad = jnp.float32(math.radians(aoa_val))
             q_inf, ref_area = 0.5 * RHO * U_INF**2, CHORD
 
-            # Differentiable loss function closes over persistent grid and rans_step
-            # but takes hard_mask and wall_dist (wd) as arguments so they can be updated.
             def loss_fn(params, hard_mask, wd):
                 w_u, w_l = params[:6], params[6:]
                 sm = build_soft_mask(w_u, w_l, subcells)
                 sm_open = sm.at[1:-1, -1].set(0.0)
-                # Geometry loss
                 x_, yu_, yl_ = generate_cst_coords(w_u, w_l, 200)
                 geo_loss = crossover_validity_loss(
                     yu_, yl_
@@ -359,18 +343,14 @@ def run_suite():
                     thickness_at_x(yu_, yl_), MIN_THICKNESS_RATIO, MAX_THICKNESS_RATIO
                 )
 
-                # Simulation use the provided hard mask and wall distance (updated each iteration)
                 base_state = grid.create_initial_state()
-
                 u_init = jnp.ones((HEIGHT, WIDTH + 1), dtype=jnp.float32) * u_inlet
                 v_init = jnp.ones((HEIGHT + 1, WIDTH), dtype=jnp.float32) * v_inlet
                 u_init, v_init = apply_ibm_continuous_forcing(u_init, v_init, hard_mask)
-
                 nu_init = jnp.where(
                     hard_mask > 0.5, jnp.float32(0.0), jnp.float32(5.0 * nu_lam)
                 )
                 nu_tilde_init = base_state.nu_tilde.with_values(nu_init)
-
                 state = base_state.__class__(
                     **{
                         **base_state.__dict__,
@@ -388,7 +368,6 @@ def run_suite():
                     grid.compute_effective_viscosity(final_state)
                 )
 
-                # Force calculation uses the CURRENT soft mask (sm_open) for gradients
                 F_drag, F_lift = compute_aerodynamic_forces(
                     final_state, sm_open, nu_eff, RHO, aoa_rad
                 )
@@ -403,9 +382,8 @@ def run_suite():
             val_and_grad = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
 
             eff_b = None
-            # --- Log Baseline Performance ---
             dat_path_base = os.path.join(
-                RESULTS_DIR, f"tmp_base_re_{re_val}_aoa_{aoa_val}.dat"
+                RESULTS_DIR, f"tmp_s809_base_re_{re_val}_aoa_{aoa_val}.dat"
             )
             write_dat(wu, wl, dat_path_base)
             xf_base = run_xfoil(dat_path_base, re_val, aoa_val)
@@ -413,30 +391,26 @@ def run_suite():
                 cl_b, cd_b = xf_base
                 eff_b = cl_b / max(cd_b, 1e-5)
                 best_cl_cd, best_cl, best_cd = eff_b, cl_b, cd_b
-                base_str = f"BASELINE RE={re_val}, AoA={aoa_val} | Cl={cl_b:.4f}, Cd={cd_b:.5f}, Cl/Cd={eff_b:.4f}\n"
+                base_str = f"BASELINE S809 RE={re_val}, AoA={aoa_val} | Cl={cl_b:.4f}, Cd={cd_b:.5f}, Cl/Cd={eff_b:.4f}\n"
                 print("  " + base_str.strip())
                 with open(OUTPUT_SUMMARY, "a") as f:
                     f.write(base_str)
             else:
-                base_str = f"BASELINE RE={re_val}, AoA={aoa_val} | Xfoil failed\n"
+                base_str = f"BASELINE S809 RE={re_val}, AoA={aoa_val} | Xfoil failed\n"
                 print("  " + base_str.strip())
                 with open(OUTPUT_SUMMARY, "a") as f:
                     f.write(base_str)
-            # --------------------------------
 
             m_adam = jnp.zeros_like(jnp.concatenate([wu, wl]))
             v_adam = jnp.zeros_like(jnp.concatenate([wu, wl]))
             beta1, beta2, eps_adam = 0.9, 0.999, 1e-8
 
             for i in range(NUM_ITERATIONS):
-                # 1. Update Geometry (Hard Mask & Wall Distance) based on CURRENT CST weights
-                # This ensures the RANS simulation and SA turbulence model remain accurate.
                 current_sm = build_soft_mask(wu, wl, subcells)
                 current_sm_open = current_sm.at[1:-1, -1].set(0.0)
                 current_hard_mask = jnp.where(current_sm_open >= 0.5, 1.0, 0.0)
                 current_wd = compute_wall_dist_np(current_hard_mask)
 
-                # 2. Optimization Step
                 (val, (cl_rans, cd_rans)), grads = val_and_grad(
                     jnp.concatenate([wu, wl]), current_hard_mask, current_wd
                 )
@@ -451,9 +425,8 @@ def run_suite():
                 wu -= update[:6]
                 wl -= update[6:]
 
-                # 3. Validation & Tracking
                 dat_path = os.path.join(
-                    RESULTS_DIR, f"tmp_re_{re_val}_aoa_{aoa_val}.dat"
+                    RESULTS_DIR, f"tmp_s809_re_{re_val}_aoa_{aoa_val}.dat"
                 )
                 write_dat(wu, wl, dat_path)
                 xf = run_xfoil(dat_path, re_val, aoa_val)
@@ -493,25 +466,22 @@ def run_suite():
             else:
                 imp_str = ""
 
-            res_str = f"OPT RE={re_val}, AoA={aoa_val} | Loss={best_loss:.4f}, Cl={best_cl:.4f}, Cd={best_cd:.5f}, Cl/Cd={best_cl_cd:.4f}{imp_str} | Max Thick={t_max:.4f}\n"
+            res_str = f"OPT S809 RE={re_val}, AoA={aoa_val} | Loss={best_loss:.4f}, Cl={best_cl:.4f}, Cd={best_cd:.5f}, Cl/Cd={best_cl_cd:.4f}{imp_str} | Max Thick={t_max:.4f}\n"
             print("\n  " + res_str.strip())
             with open(OUTPUT_SUMMARY, "a") as f:
                 f.write(res_str)
             write_dat(
                 bw_u,
                 bw_l,
-                os.path.join(
-                    RESULTS_DIR, f"best_airfoil_re_{re_val}_aoa_{aoa_val}.dat"
-                ),
+                os.path.join(RESULTS_DIR, f"best_s809_re_{re_val}_aoa_{aoa_val}.dat"),
             )
         plot_re(re_val, final_airfoils)
 
 
 def plot_re(re_val, final_airfoils):
     plt.figure(figsize=(10, 4))
-    # Initial
-    x, yu, yl = generate_cst_coords(NACA0012_W_U, NACA0012_W_L, 200)
-    plt.plot(x, yu, "k--", alpha=0.3, label="NACA 0012")
+    x, yu, yl = generate_cst_coords(S809_W_U, S809_W_L, 200)
+    plt.plot(x, yu, "k--", alpha=0.3, label="Baseline S809")
     plt.plot(x, yl, "k--", alpha=0.3)
 
     colors = ["#E74C3C", "#2ECC71", "#3498DB"]
@@ -522,12 +492,12 @@ def plot_re(re_val, final_airfoils):
             plt.plot(x, yu, color=colors[i], label=f"Opt AoA {aoa}", linewidth=2)
             plt.plot(x, yl, color=colors[i], linewidth=2)
 
-    plt.title(f"Optimized Shapes at RE = {re_val}")
+    plt.title(f"Optimized S809 Shapes at RE = {re_val}")
     plt.xlabel("x/c")
     plt.ylabel("y/c")
     plt.legend()
     plt.axis("equal")
-    plt.savefig(os.path.join(RESULTS_DIR, f"shapes_re_{re_val}.png"), dpi=150)
+    plt.savefig(os.path.join(RESULTS_DIR, f"s809_shapes_re_{re_val}.png"), dpi=150)
     plt.close()
 
 
