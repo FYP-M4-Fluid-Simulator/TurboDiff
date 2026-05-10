@@ -421,8 +421,6 @@ async def stream_state(ws: WebSocket, session_id: str):
 
     max_steps = int(config.sim_time / config.dt) if config.sim_time > 0 else -1
     step = 0
-    last_cl: float | None = None
-    last_cd: float | None = None
 
     print(f"   Starting RANS simulation for session {config.session_id}")
     print(f"   Re={config.reynolds_number}, nu={viscosity:.2e}")
@@ -434,9 +432,7 @@ async def stream_state(ws: WebSocket, session_id: str):
     # and lets the event loop service keepalive pings between chunks.
     _CHUNK_SIZE = 20
 
-    def _run_chunk(
-        current_state: "FluidState", n_steps: int
-    ) -> "list[FluidState]":
+    def _run_chunk(current_state: "FluidState", n_steps: int) -> "list[FluidState]":
         """Run n_steps of the RANS simulation synchronously in a threadpool worker.
         Returns ALL intermediate states (one per step) so the main loop can stream
         each one individually, giving the frontend per-step frame updates instead
@@ -500,9 +496,7 @@ async def stream_state(ws: WebSocket, session_id: str):
             # the "keepalive ping failed / AssertionError" crash.
             # _run_chunk now returns all intermediate states so we can stream
             # each one, giving the frontend per-step updates.
-            chunk_states = await loop.run_in_executor(
-                None, _run_chunk, state, chunk
-            )
+            chunk_states = await loop.run_in_executor(None, _run_chunk, state, chunk)
             state = chunk_states[-1]
             step += chunk
 
@@ -513,26 +507,6 @@ async def stream_state(ws: WebSocket, session_id: str):
             for s in chunk_states:
                 if s.step % config.stream_every != 0:
                     continue
-
-                # Calculate aerodynamic coefficients using the benchmark method
-                nu_eff_field = grid.compute_effective_viscosity(s)
-                F_drag, F_lift = compute_aerodynamic_forces(
-                    s,
-                    airfoil_mask,  # Use only the airfoil mask for forces
-                    config.cell_size,
-                    nu_eff_field,
-                    grid.rho,
-                    angle_rad,
-                )
-
-                q_inf = 0.5 * grid.rho * config.inflow_velocity**2
-                ref_area = config.chord_length
-
-                last_cl = float(F_lift / (q_inf * ref_area))
-                last_cd = float(F_drag / (q_inf * ref_area))
-
-                # Avoid division by zero for L/D
-                l_d = last_cl / last_cd if abs(last_cd) > 1e-9 else 0.0
 
                 u_center, v_center, curl, pressure, solid, density = (
                     _extract_cell_fields(s, config.cell_size)
@@ -548,9 +522,8 @@ async def stream_state(ws: WebSocket, session_id: str):
                         "airfoil_offset_y": float(config.airfoil_offset_y),
                         "time": float(s.time),
                         "step": int(s.step),
-                        "cl": last_cl,
-                        "cd": last_cd,
-                        "l_d": float(l_d),
+                        # cl/cd are NOT sent per-frame — only XFoil-verified
+                        # values are authoritative (sent in final_results).
                     },
                     "fields": {
                         "u": jnp.asarray(u_center).tolist(),
@@ -590,7 +563,7 @@ async def stream_state(ws: WebSocket, session_id: str):
         _AIRFOILS_DIR = os.path.join(project_root, "Airfoils")
         os.makedirs(_AIRFOILS_DIR, exist_ok=True)
         dat_path = os.path.join(_AIRFOILS_DIR, f"{session_id}.dat")
-    
+
         print(f"   Running XFoil validation: Re={re:.2e}, AoA={aoa_deg}°")
         print(f"   DAT file → {dat_path}")
         try:
@@ -639,41 +612,32 @@ async def stream_state(ws: WebSocket, session_id: str):
                         pass
 
         # Send a final "results" message with XFoil data before closing
-        if last_cl is not None and last_cd is not None:
-            final_l_d = last_cl / last_cd if abs(last_cd) > 1e-9 else 0.0
-            final_payload = {
-                "type": "final_results",
-                "meta": {
-                    "session_id": config.session_id,
-                    "height": int(config.height),
-                    "width": int(config.width),
-                    "cell_size": float(config.cell_size),
-                    "chord_length": float(config.chord_length),
-                    "time": float(state.time),
-                    "step": int(state.step),
-                    "cl": last_cl,
-                    "cd": last_cd,
-                    "l_d": float(final_l_d),
-                    "xfoil_cl": xfoil_cl,
-                    "xfoil_cd": xfoil_cd,
-                    "xfoil_l_d": xfoil_l_d,
-                    "xfoil_status": xfoil_status,
-                },
-            }
-            try:
-                await ws.send_json(final_payload)
-            except Exception:
-                pass  # Client may have disconnected; that's fine
+        final_payload = {
+            "type": "final_results",
+            "meta": {
+                "session_id": config.session_id,
+                "time": float(state.time),
+                "step": int(state.step),
+                "xfoil_cl": xfoil_cl,
+                "xfoil_cd": xfoil_cd,
+                "xfoil_l_d": xfoil_l_d,
+                "xfoil_status": xfoil_status,
+            },
+        }
+        try:
+            await ws.send_json(final_payload)
+        except Exception:
+            pass  # Client may have disconnected; that's fine
 
-            # Update the in-memory cache with XFoil results
-            if session_id in _SIMULATION_RESULTS:
-                cached = _SIMULATION_RESULTS[session_id]
-                cached_meta = dict(cached.get("meta", {}))
-                cached_meta["xfoil_cl"] = xfoil_cl
-                cached_meta["xfoil_cd"] = xfoil_cd
-                cached_meta["xfoil_l_d"] = xfoil_l_d
-                cached_meta["xfoil_status"] = xfoil_status
-                _SIMULATION_RESULTS[session_id] = {**cached, "meta": cached_meta}
+        # Update the in-memory cache with XFoil results
+        if session_id in _SIMULATION_RESULTS:
+            cached = _SIMULATION_RESULTS[session_id]
+            cached_meta = dict(cached.get("meta", {}))
+            cached_meta["xfoil_cl"] = xfoil_cl
+            cached_meta["xfoil_cd"] = xfoil_cd
+            cached_meta["xfoil_l_d"] = xfoil_l_d
+            cached_meta["xfoil_status"] = xfoil_status
+            _SIMULATION_RESULTS[session_id] = {**cached, "meta": cached_meta}
 
         # Simulation completed, close the connection
         print(f"Closing WebSocket for session {config.session_id}")
@@ -682,27 +646,31 @@ async def stream_state(ws: WebSocket, session_id: str):
     except WebSocketDisconnect:
         print(f"WebSocket disconnected for session {config.session_id}")
     finally:
-        if last_cl is not None and last_cd is not None:
-            print(
-                f"Saving final metrics for session {config.session_id}: cl={last_cl:.4f}, cd={last_cd:.4f}"
+        # Save XFoil-verified metrics to DB when converged; otherwise leave cl/cd null
+        # so the DB reflects the same standard as the frontend.
+        save_cl = xfoil_cl if xfoil_status == "converged" else None
+        save_cd = xfoil_cd if xfoil_status == "converged" else None
+        print(
+            f"Saving final metrics for session {config.session_id}: "
+            f"xfoil_status={xfoil_status}, cl={save_cl}, cd={save_cd}"
+        )
+        try:
+            repo = get_storage_repository()
+            repo.update_simulation_metrics(
+                SimulationMetricsUpdate(
+                    session_id=session_id,
+                    user_id=config.user_id,
+                    cl=save_cl,
+                    cd=save_cd,
+                    lift=None,
+                    drag=None,
+                    angle_of_attack=config.angle_of_attack,
+                )
             )
-            try:
-                repo = get_storage_repository()
-                repo.update_simulation_metrics(
-                    SimulationMetricsUpdate(
-                        session_id=session_id,
-                        user_id=config.user_id,
-                        cl=last_cl,
-                        cd=last_cd,
-                        lift=None,
-                        drag=None,
-                        angle_of_attack=config.angle_of_attack,
-                    )
-                )
-            except Exception as e:
-                print(
-                    f"Failed to auto-save simulation metrics for session {session_id}: {e}"
-                )
+        except Exception as e:
+            print(
+                f"Failed to auto-save simulation metrics for session {session_id}: {e}"
+            )
 
 
 @router.get("/sessions/{session_id}/result")

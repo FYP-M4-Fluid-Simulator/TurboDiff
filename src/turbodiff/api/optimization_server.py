@@ -740,10 +740,13 @@ async def stream_optimization(ws: WebSocket, session_id: str):
                         except Exception:
                             pass
 
-            # Fallback to JAX RANS values if XFoil fails
+            # ── Tracking & display (mirrors optimize_naca_suite.py exactly) ──────
+            # Best shape is ONLY promoted when XFoil converges (suite lines 452-461).
+            # A failed XFoil call just supplies display values for this iteration.
             if xf:
                 cl_x, cd_x = xf
                 eff = cl_x / max(cd_x, 1e-5)
+                # Update best only on XFoil success (suite behavior)
                 if eff > best_cl_cd:
                     best_cl_cd = eff
                     best_params = jnp.array(params)
@@ -762,23 +765,17 @@ async def stream_optimization(ws: WebSocket, session_id: str):
                     f"Session {config.session_id} Iter {iteration+1}: XFoil converged Cl={cl_x:.4f}, Cd={cd_x:.5f}, Eff={eff:.2f}"
                 )
             else:
-                # XFoil failed, use JAX RANS as fallback
-                display_cl = float(C_L)
-                display_cd = float(C_D)
-                cl_cd = display_cl / display_cd if abs(display_cd) > 1e-12 else 0.0
-                if cl_cd > best_cl_cd:
-                    best_cl_cd = cl_cd
-                    best_params = jnp.array(params)
-                    best_cl = display_cl
-                    best_cd = display_cd
-                    best_lift = float(lift_force)
-                    best_drag = float(drag_force)
+                # XFoil failed — do NOT update best; send null for cl, cd, cl_cd
+                # so the frontend only plots XFoil-verified points.
+                display_cl = None
+                display_cd = None
+                cl_cd = None
 
                 print(
-                    f"    Iter {iteration+1:2d}: Loss={float(loss_val):.4f}, Xfoil failed (using JAX RANS: Cl={display_cl:.4f}, Cd={display_cd:.5f})"
+                    f"    Iter {iteration+1:2d}: Loss={float(loss_val):.4f}, Xfoil failed — no results recorded"
                 )
                 logger.warning(
-                    f"Session {config.session_id} Iter {iteration+1}: XFoil failed to converge for Re={re_val}, AoA={aoa_val}. Falling back to JAX RANS."
+                    f"Session {config.session_id} Iter {iteration+1}: XFoil failed (Re={re_val}, AoA={aoa_val}); best not updated."
                 )
 
             last_lift = float(lift_force)
