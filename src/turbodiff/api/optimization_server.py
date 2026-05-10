@@ -641,6 +641,7 @@ async def stream_optimization(ws: WebSocket, session_id: str):
     best_cd = None
     best_lift = None
     best_drag = None
+    best_max_thickness = None
 
     try:
         for iteration in range(config.num_iterations):
@@ -754,6 +755,7 @@ async def stream_optimization(ws: WebSocket, session_id: str):
                     best_cd = float(cd_x)
                     best_lift = float(lift_force)
                     best_drag = float(drag_force)
+                    best_max_thickness = float(jnp.max(y_upper_cst - y_lower_cst))
 
                 display_cl = float(cl_x)
                 display_cd = float(cd_x)
@@ -794,6 +796,7 @@ async def stream_optimization(ws: WebSocket, session_id: str):
                     "cl_cd": cl_cd,
                     "lift_force": last_lift,
                     "drag_force": last_drag,
+                    "max_thickness": float(jnp.max(y_upper_cst - y_lower_cst)),
                 },
                 "shape": {
                     "cst_upper": cur_upper.tolist(),
@@ -836,6 +839,11 @@ async def stream_optimization(ws: WebSocket, session_id: str):
                 "final_cl_cd": best_cl_cd,
                 "final_drag": best_drag if best_drag is not None else float(drag_force),
                 "final_loss": float(loss_val),
+                "final_max_thickness": (
+                    best_max_thickness
+                    if best_max_thickness is not None
+                    else float(jnp.max(y_upper_final - y_lower_final))
+                ),
             },
             "shape": {
                 "cst_upper": final_upper.tolist(),
