@@ -23,9 +23,13 @@ COPY pyproject.toml ./
 
 # 2. Copy source code 
 COPY src ./src
+COPY turbodiff-auth-firebase-adminsdk-fbsvc-c54cff0f4e.json /app/firebase-credentials.json
 
 RUN pip install --no-cache-dir .
 
+# Set environment variables
+ENV GOOGLE_APPLICATION_CREDENTIALS=/app/firebase-credentials.json
+ENV XFOIL_PATH=xfoil
 
 
 # 3. Expose the port FastAPI/Uvicorn will run on

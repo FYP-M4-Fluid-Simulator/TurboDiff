@@ -5,6 +5,9 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.security.utils import get_authorization_scheme_param
 import firebase_admin
 from firebase_admin import auth
+from dotenv import load_dotenv
+
+load_dotenv()
 
 try:
     if not firebase_admin._apps:
