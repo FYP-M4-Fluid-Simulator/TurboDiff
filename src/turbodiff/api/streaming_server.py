@@ -434,11 +434,16 @@ async def stream_state(ws: WebSocket, session_id: str):
     # and lets the event loop service keepalive pings between chunks.
     _CHUNK_SIZE = 20
 
-    def _run_chunk(current_state: "FluidState", n_steps: int) -> "FluidState":
+    def _run_chunk(
+        current_state: "FluidState", n_steps: int
+    ) -> "list[FluidState]":
         """Run n_steps of the RANS simulation synchronously in a threadpool worker.
-        Defined outside the loop to avoid re-creating the closure on every iteration.
+        Returns ALL intermediate states (one per step) so the main loop can stream
+        each one individually, giving the frontend per-step frame updates instead
+        of a single frame every 20 steps.
         """
         s = current_state
+        states: list = []
         for _ in range(n_steps):
             # 1. SA turbulence step
             s = grid.step_sa_turbulence(s, grid._wall_dist, num_diff_iters=4)
@@ -468,7 +473,8 @@ async def stream_state(ws: WebSocket, session_id: str):
                 time=s.time + grid.dt,
                 step=s.step + 1,
             )
-        return s
+            states.append(s)
+        return states
 
     loop = asyncio.get_running_loop()
 
@@ -492,18 +498,26 @@ async def stream_state(ws: WebSocket, session_id: str):
             # This yields control back to the asyncio event loop between chunks,
             # allowing WebSocket keepalive pings to be serviced and preventing
             # the "keepalive ping failed / AssertionError" crash.
-            state = await loop.run_in_executor(None, _run_chunk, state, chunk)
+            # _run_chunk now returns all intermediate states so we can stream
+            # each one, giving the frontend per-step updates.
+            chunk_states = await loop.run_in_executor(
+                None, _run_chunk, state, chunk
+            )
+            state = chunk_states[-1]
             step += chunk
 
             # Log progress every 100 steps
             if (step // chunk) % (100 // _CHUNK_SIZE or 1) == 0:
                 print(f"   Progress: step={step}/{max_steps}")
 
-            if step % config.stream_every == 0:
+            for s in chunk_states:
+                if s.step % config.stream_every != 0:
+                    continue
+
                 # Calculate aerodynamic coefficients using the benchmark method
-                nu_eff_field = grid.compute_effective_viscosity(state)
+                nu_eff_field = grid.compute_effective_viscosity(s)
                 F_drag, F_lift = compute_aerodynamic_forces(
-                    state,
+                    s,
                     airfoil_mask,  # Use only the airfoil mask for forces
                     config.cell_size,
                     nu_eff_field,
@@ -521,7 +535,7 @@ async def stream_state(ws: WebSocket, session_id: str):
                 l_d = last_cl / last_cd if abs(last_cd) > 1e-9 else 0.0
 
                 u_center, v_center, curl, pressure, solid, density = (
-                    _extract_cell_fields(state, config.cell_size)
+                    _extract_cell_fields(s, config.cell_size)
                 )
                 payload = {
                     "meta": {
@@ -532,8 +546,8 @@ async def stream_state(ws: WebSocket, session_id: str):
                         "chord_length": float(config.chord_length),
                         "airfoil_offset_x": float(config.airfoil_offset_x),
                         "airfoil_offset_y": float(config.airfoil_offset_y),
-                        "time": float(state.time),
-                        "step": int(state.step),
+                        "time": float(s.time),
+                        "step": int(s.step),
                         "cl": last_cl,
                         "cd": last_cd,
                         "l_d": float(l_d),
@@ -550,10 +564,10 @@ async def stream_state(ws: WebSocket, session_id: str):
                 await ws.send_json(payload)
                 _SIMULATION_RESULTS[session_id] = payload
 
-            if config.stream_fps > 0:
-                await asyncio.sleep(1.0 / config.stream_fps)
-            else:
-                await asyncio.sleep(0)
+                if config.stream_fps > 0:
+                    await asyncio.sleep(1.0 / config.stream_fps)
+                else:
+                    await asyncio.sleep(0)
 
         # ── XFoil validation on the completed airfoil ─────────────────────
         xfoil_cl: float | None = None
