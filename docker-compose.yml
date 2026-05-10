@@ -1,0 +1,14 @@
+services:
+  turbodiff:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./src:/app/src  # Mount source code for hot-reload
+      - ./pyproject.toml:/app/pyproject.toml
+      - ./firebase-creds.json:/app/firebase-creds.json:ro
+    env_file: .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    entrypoint: []
+    command: ["uvicorn", "turbodiff.api.app:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--ws-ping-interval", "300", "--ws-ping-timeout", "300"]
