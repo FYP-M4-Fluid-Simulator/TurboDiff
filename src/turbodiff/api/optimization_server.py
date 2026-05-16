@@ -715,15 +715,27 @@ async def stream_optimization(ws: WebSocket, session_id: str):
                 )
                 xf = await asyncio.to_thread(run_xfoil, dat_path, re_val, aoa_val)
                 if xf:
-                    logger.info(
-                        "XFoil for session %s, iteration %d completed: Cl=%f, Cd=%f, Eff=%f",
-                        config.session_id,
-                        iteration + 1,
-                        xf[0],
-                        xf[1],
-                        xf[0] / max(xf[1], 1e-5),
-                    )
-                else:
+                    cl_x, cd_x = xf
+                    eff = cl_x / max(cd_x, 1e-5)
+                    if eff > 300:
+                        logger.warning(
+                            "XFoil produced unphysical result (Cl/Cd = %f > 300) for session %s, iteration %d. Treating as failed.",
+                            eff,
+                            config.session_id,
+                            iteration + 1,
+                        )
+                        xf = None
+                    else:
+                        logger.info(
+                            "XFoil for session %s, iteration %d completed: Cl=%f, Cd=%f, Eff=%f",
+                            config.session_id,
+                            iteration + 1,
+                            cl_x,
+                            cd_x,
+                            eff,
+                        )
+
+                if not xf:
                     logger.warning(
                         "XFoil did not converge for session %s, iteration %d (Re=%f, AoA=%f)",
                         config.session_id,
